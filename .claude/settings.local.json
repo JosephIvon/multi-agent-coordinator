@@ -9,7 +9,14 @@
       "Bash(python examples/local_runner.py)",
       "Bash(git init *)",
       "Bash(git config *)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -m compileall -q src examples scripts)",
+      "Bash(git remote *)",
+      "Bash(git branch *)",
+      "Bash(git push *)",
+      "Bash(xargs wc -l)",
+      "Bash(python -m pytest tests/test_storage.py tests/test_registry.py -q)"
     ]
   }
 }

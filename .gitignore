@@ -36,9 +36,8 @@ htmlcov/
 *.db-wal
 *.db-shm
 
-# MAC specific
+# MAC specific (runtime)
 mac.db
-*.log
 
 # Distribution / packaging
 dist/
