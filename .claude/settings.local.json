@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest -q)",
+      "Bash(python -c \"from mac.testing.planner import _HIGH_RISK_SIGNALS; print\\(_HIGH_RISK_SIGNALS\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -m compileall -q src examples)",
+      "Bash(python examples/local_handoff.py)",
+      "Bash(python examples/local_runner.py)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git add *)"
+    ]
+  }
+}

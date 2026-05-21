@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# DB
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# MAC specific
+mac.db
+*.log
+
+# Distribution / packaging
+dist/
+build/
+*.whl
+*.tar.gz
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
