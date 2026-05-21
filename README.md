@@ -4,20 +4,38 @@
 
 ---
 
+## What Is MAC?
+
+MAC is a lightweight coordination layer for AI coding agents — a task ledger, context broker, quality gate, and handoff protocol for multi-agent Python development.
+
+It helps multiple AI agents work together on shared tasks: agents register with their capabilities, submit tasks, claim work, execute with verified quality gates, and hand off context to the next agent.
+
+MAC does NOT replace MCP (resources/tools) or LangGraph/CrewAI (execution engines). It owns: scheduling, ledger, handoff protocol, and completion gates.
+
+## 什么是 MAC？
+
+MAC 是 AI 编程 Agent 的轻量协调层——提供任务账本、上下文交接、质量门验证和 Agent 间交接协议，支持多 Agent Python 开发工作流。
+
+多 Agent 协作场景：Agent 注册能力、提交任务、认领工作、执行并通过质量验证、再将上下文交接给下一个 Agent。
+
+MAC 不替代 MCP（资源/工具层）和 LangGraph/CrewAI（执行引擎）。MAC 专注：调度、账本、交接协议、完成门。
+
+---
+
 ## Install
 
 ```bash
 pip install mac-agent                     # CLI + local ledger
-pip install "mac-agent[http]"            # + FastAPI HTTP adapter
-pip install -e ".[dev]"                   # development with tests
+pip install "mac-agent[http]"             # + FastAPI HTTP adapter
+pip install -e ".[dev]"                    # development with tests
 ```
 
 ## 安装
 
 ```bash
 pip install mac-agent                     # CLI + 本地账本
-pip install "mac-agent[http]"             # + FastAPI HTTP 适配器
-pip install -e ".[dev]"                  # 开发依赖（含测试）
+pip install "mac-agent[http]"              # + FastAPI HTTP 适配器
+pip install -e ".[dev]"                   # 开发依赖（含测试）
 ```
 
 ---
@@ -61,8 +79,7 @@ registry.register(agent)
 
 # Submit task
 task = TaskTransfer(
-    task_id="t1",
-    source_agent_id="alice",
+    task_id="t1", source_agent_id="alice",
     payload=TaskPayload(type="write_code", summary="Write auth handler")
 )
 registry.submit_task(task)
@@ -89,8 +106,7 @@ registry.register(agent)
 
 # 提交任务
 task = TaskTransfer(
-    task_id="t1",
-    source_agent_id="alice",
+    task_id="t1", source_agent_id="alice",
     payload=TaskPayload(type="write_code", summary="编写 auth handler")
 )
 registry.submit_task(task)
@@ -115,7 +131,7 @@ app = create_app(Registry(SQLiteStorage("mac.db")))
 # Run with: uvicorn app:app --port 8000
 ```
 
-### HTTP 适配器
+## HTTP 适配器
 
 ```python
 from mac.transport.http_ws import create_app
@@ -126,7 +142,7 @@ app = create_app(Registry(SQLiteStorage("mac.db")))
 # 运行方式: uvicorn app:app --port 8000
 ```
 
-**Endpoints / 端点**:
+**Endpoints:**
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -148,6 +164,8 @@ app = create_app(Registry(SQLiteStorage("mac.db")))
 | `POST` | `/tasks/{id}/retry` | Retry failed task |
 | `POST` | `/tasks/{id}/cancel` | Cancel task |
 | `GET` | `/ledger/{trace_id}` | Audit trail |
+
+**端点：**
 
 | 方法 | 路径 | 描述 |
 |--------|------|------|
@@ -176,12 +194,12 @@ app = create_app(Registry(SQLiteStorage("mac.db")))
 
 ```bash
 python examples/local_handoff.py   # two-agent handoff via Registry
-python examples/local_runner.py    # LocalAgentRunner adapter loop
+python examples/local_runner.py     # LocalAgentRunner adapter loop
 ```
 
 ## 示例
 
 ```bash
 python examples/local_handoff.py   # 双 Agent 通过 Registry 交接
-python examples/local_runner.py    # LocalAgentRunner 适配器循环
+python examples/local_runner.py     # LocalAgentRunner 适配器循环
 ```
