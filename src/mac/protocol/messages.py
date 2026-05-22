@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
@@ -32,7 +32,79 @@ class AgentCard(BaseModel):
     status: str = "online"
     last_heartbeat: float = 0
     project_context: str | None = None
+    allowed_paths: list[str] = Field(default_factory=list)
+    forbidden_paths: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Plan(BaseModel):
+    """A lightweight grouping unit for coordinated multi-task work."""
+
+    plan_id: str = Field(default_factory=lambda: str(uuid4()))
+    goal: str
+    status: Literal["draft", "active", "completed", "cancelled"] = "draft"
+    task_ids: list[str] = Field(default_factory=list)
+    created_by: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    closed_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerificationEntry(BaseModel):
+    """A compact evidence item produced during agent handoff."""
+
+    command: str
+    result: Literal["pass", "fail"]
+    description: str = ""
+
+
+class HandoffResult(BaseModel):
+    """Structured completion handoff produced by a worker agent."""
+
+    task_id: str
+    plan_id: str | None = None
+    agent_id: str
+    verification: list[VerificationEntry] = Field(default_factory=list)
+    changed_files: list[str] = Field(default_factory=list)
+    docs_touched: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    boundary_review: Literal["pass", "block", "not_required"] = "not_required"
+    violated_guardrail: list[str] = Field(default_factory=list)
+    timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class ConflictRecord(BaseModel):
+    """A collaboration conflict that needs explicit resolution."""
+
+    conflict_id: str = Field(default_factory=lambda: str(uuid4()))
+    plan_id: str | None = None
+    task_id: str | None = None
+    source: str
+    severity: Literal["blocking", "non_blocking"] = "non_blocking"
+    description: str
+    involved_agents: list[str] = Field(default_factory=list)
+    involved_files: list[str] = Field(default_factory=list)
+    resolved: bool = False
+    resolution: str = ""
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    resolved_at: str | None = None
+
+
+class PathRule(BaseModel):
+    """Project-level path guardrails. Empty/default rules mean no restriction."""
+
+    allow_all: bool = True
+    forbidden_patterns: list[str] = Field(default_factory=list)
+    allowed_patterns: list[str] = Field(default_factory=list)
+
+
+class CoordinationPolicy(BaseModel):
+    """Feature switches for optional coordination behavior."""
+
+    require_review: bool = False
+    require_path_check: bool = False
+    path_rule: PathRule = Field(default_factory=PathRule)
+    max_retry_count: int = Field(default=3, ge=0)
 
 
 class ContextBundle(BaseModel):
@@ -124,6 +196,8 @@ class TaskTransfer(BaseModel):
     test_contract: Any | None = None
     priority: int = Field(default=5, ge=1, le=10)
     status: str = "proposed"
+    plan_id: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
 
     max_hops: int = Field(default=5, ge=1)
     current_hops: int = Field(default=0, ge=0)
@@ -200,6 +274,7 @@ class TaskEvidenceBundle(BaseModel):
     execution_agent_id: str | None = None
     required_capability: str | None = None
     observed_capability_score: dict[str, Any] | None = None
+    handoff_result: HandoffResult | None = None
 
 
 class QualityGatePreview(BaseModel):

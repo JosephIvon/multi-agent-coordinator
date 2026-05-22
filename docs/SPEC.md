@@ -1,213 +1,212 @@
-# Multi-Agent Coordinator (MAC) 设计方案
+# Multi-Agent Coordinator (MAC) Specification
 
-> 版本：1.5
-> 日期：2026-05-22
-> 状态：已批准
-
----
-
-## 1. 定位与目标
-
-**项目名称**：multi-agent-coordinator（MAC）
-
-**定位**：通用跨 Agent 任务交接与协调层，支撑"任务交接、上下文交接、验证交接协议、运行账本"四个核心能力。
-
-**目标用户**：
-- 开发者：通过本地 API 或 CLI bridge 接入任何 Python 项目
-- AI Agent（Claude Code、Trae、智谱、Hermes 等）：通过 A2A-compatible task profile 协作
-- CI/CD 系统：将构建、测试、验证结果作为可审计任务写入 MAC 账本
-
-**非目标**：
-- 不做 MCP 的替代品；MCP 继续负责资源、工具、上下文引用
-- 不做 LangGraph/CrewAI 的替代品；MAC 是轻量跨 Agent 任务交接协议层
-- 不做 gRPC、Redis、Postgres、Cloud Bridge（Phase 2）
+> Version: 2.0
+> Date: 2026-05-22
+> Status: implemented for local Phase A collaboration
 
 ---
 
-## 2. 核心概念
+## 1. Purpose
 
-### 2.1 AgentCard
+MAC is a lightweight coordination ledger for AI coding agents. It provides shared task state, context handoff, quality evidence, plan grouping, dependency readiness, handoff records, conflict records, and packet generation.
+
+MAC is intentionally not an execution engine. External agents still run in their own terminals or tools; MAC gives them a common protocol and durable local state.
+
+---
+
+## 2. Core Models
+
+### AgentCard
+
+Agents advertise capabilities and optional path boundaries.
 
 ```python
 class AgentCard(BaseModel):
     agent_id: str
     name: str
-    version: str = "1.0"
     capabilities: list[AgentCapability]
     load: int = Field(default=0, ge=0, le=100)
     status: str = "online"
     last_heartbeat: float = 0
     project_context: str | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    allowed_paths: list[str] = Field(default_factory=list)
+    forbidden_paths: list[str] = Field(default_factory=list)
 ```
 
-### 2.2 ContextBundle
+Empty `allowed_paths` and `forbidden_paths` means no agent-level path restriction.
 
-```python
-class ContextBundle(BaseModel):
-    summary: str
-    artifact_refs: list[str] = Field(default_factory=list)
-    changed_files: list[str] = Field(default_factory=list)
-    decision_log: list[str] = Field(default_factory=list)
-    open_questions: list[str] = Field(default_factory=list)
-    acceptance_criteria: list[str] = Field(default_factory=list)
-    constraints: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-```
+### TaskTransfer
 
-### 2.3 TaskTransfer
+`TaskTransfer` is the durable task row.
 
 ```python
 class TaskTransfer(BaseModel):
     task_id: str
-    trace_id: str = Field(default_factory=lambda: str(uuid4()))
+    trace_id: str
     source_agent_id: str | None = None
     target_agent_id: str | None = None
     payload: TaskPayload | None = None
     context: ContextBundle | None = None
-    test_contract: TestContract | None = None
+    test_contract: Any | None = None
     priority: int = Field(default=5, ge=1, le=10)
     status: str = "proposed"
-    max_hops: int = Field(default=5, ge=1)
-    current_hops: int = Field(default=0, ge=0)
-    ttl_seconds: int = Field(default=3600, ge=1)
-    error_code: str | None = None
-    retry_count: int = Field(default=0, ge=0)
+    plan_id: str | None = None
+    depends_on: list[str] = Field(default_factory=list)
+    retry_count: int = 0
     fallback_agent_id: str | None = None
-    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
-    updated_at: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 ```
 
-### 2.4 TestContract
+`TaskTransfer` does not embed `HandoffResult`. Handoff records are stored separately so task rows stay small.
+
+### Plan
+
+`Plan` groups related tasks.
 
 ```python
-class TestContract(BaseModel):
-    risk_level: RiskLevel  # low | medium | high
-    recommended_commands: list[str] = Field(default_factory=list)
-    required_commands: list[str] = Field(default_factory=list)
-    required_evidence: list[str] = Field(default_factory=list)
-    allow_manual_override: bool = False
-
-    @classmethod
-    def for_risk(cls, risk_level: RiskLevel) -> TestContract:
-        # low: pytest smoke + test_output
-        # medium: pytest tests + test_output, changed_files
-        # high: pytest --cov + test_output, coverage_report, review_notes
+class Plan(BaseModel):
+    plan_id: str
+    goal: str
+    status: Literal["draft", "active", "completed", "cancelled"] = "draft"
+    task_ids: list[str] = Field(default_factory=list)
+    created_by: str = ""
+    created_at: str
+    closed_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 ```
 
-### 2.5 AuditEntry
+Phase A supports flat task lists plus `depends_on`. `parallel_groups` are deferred.
+
+### HandoffResult
+
+`HandoffResult` is the structured output a worker leaves for the next agent or reviewer.
 
 ```python
-class AuditEntry(BaseModel):
-    entry_id: str = Field(default_factory=lambda: str(uuid4()))
-    trace_id: str
+class HandoffResult(BaseModel):
     task_id: str
-    agent_id: str = ""
-    actor: str = ""
-    action: str
-    from_status: str | None = None
-    to_status: str | None = None
-    message: str = ""
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    details: dict[str, Any] = Field(default_factory=dict)
+    plan_id: str | None = None
+    agent_id: str
+    verification: list[VerificationEntry] = Field(default_factory=list)
+    changed_files: list[str] = Field(default_factory=list)
+    docs_touched: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    boundary_review: Literal["pass", "block", "not_required"] = "not_required"
+    violated_guardrail: list[str] = Field(default_factory=list)
 ```
 
----
+### ConflictRecord
 
-## 3. 状态机
-
-```
-proposed → accepted → running → completed
-    ↓          ↓           ↓
-  rejected   rejected    failed
-              ↓
-          cancelled (via cancel_task)
-```
-
-状态转换规则：
-- `proposed → accepted`：目标 Agent 显式 accept，或通过 `claim_next_task()` CAS 更新
-- `accepted → running`：Agent 调用 `start_task()`
-- `running → completed`：`complete_task()` 时 quality gate 通过
-- `running → failed`：执行异常、TTL 过期、max_hops 超限或 quality gate 失败
-- 任意状态 → `cancelled`：显式调用 `cancel_task()`
-
----
-
-## 4. 传输层
-
-### 4.1 进程内 API
-
-直接使用 `Registry` 类：
+`ConflictRecord` tracks coordination conflicts that need human or reviewer resolution.
 
 ```python
-from mac.registry import Registry
-from mac.storage.sqlite import SQLiteStorage
-
-registry = Registry(SQLiteStorage("mac.db"))
-registry.register(agent)
-registry.submit_task(task)
+class ConflictRecord(BaseModel):
+    conflict_id: str
+    plan_id: str | None = None
+    task_id: str | None = None
+    source: str
+    severity: Literal["blocking", "non_blocking"] = "non_blocking"
+    description: str
+    involved_agents: list[str] = Field(default_factory=list)
+    involved_files: list[str] = Field(default_factory=list)
+    resolved: bool = False
+    resolution: str = ""
 ```
 
-### 4.2 HTTP 适配器（FastAPI）
+---
+
+## 3. Task State Machine
+
+```text
+proposed -> accepted -> running -> completed
+    |          |           |
+    v          v           v
+ rejected   rejected     failed
+                         cancelled
+```
+
+Rules:
+
+- `proposed -> accepted`: explicit accept or `claim_next_task()`.
+- `accepted -> running`: `start_task()`.
+- `running -> completed`: `complete_task()` after the quality gate allows completion.
+- `running -> failed`: `fail_task()`.
+- Any non-terminal task can become `cancelled`.
+- Phase A does not change `complete_task()` into a review workflow.
+
+---
+
+## 4. Dependency Readiness
+
+`depends_on` is a list of upstream task IDs.
+
+A proposed task is ready only when every dependency exists and has status `completed` or `cancelled`.
+
+Important: `accepted` does not unlock a dependency. It only means an agent claimed the upstream task. A cancelled dependency stops scheduler waiting, but worker/review packets show the cancelled dependency explicitly so humans and agents can decide whether downstream work is still valid.
+
+`list_ready_tasks()` is read-only and does not write audit entries.
+
+`claim_next_task()` skips dependency-blocked tasks.
+
+---
+
+## 5. Path Guardrails
+
+Path checking combines optional agent boundaries and optional project `PathRule`.
+
+Defaults are allow-all:
 
 ```python
-from mac.transport.http_ws import create_app
-
-app = create_app(Registry(SQLiteStorage("mac.db")))
-# uvicorn app:app --port 8000
+class PathRule(BaseModel):
+    allow_all: bool = True
+    forbidden_patterns: list[str] = Field(default_factory=list)
+    allowed_patterns: list[str] = Field(default_factory=list)
 ```
 
-端点见 `README.md` 端点表。
+If no allowed or forbidden patterns exist, no checking is performed. If any pattern exists, changed files in `HandoffResult.changed_files` are checked. Violations set `boundary_review="block"` and record a `path_violation` conflict.
 
 ---
 
-## 5. SQLite Task Ledger
+## 6. Registry API
 
-表结构：
+Main operations:
 
-| 表 | 用途 |
-|----|------|
-| `agent_cards` | Agent 注册信息、capability、load、status |
-| `task_transfers` | 任务状态、payload、project_context |
-| `audit_entries` | 审计事件（按 task_id 索引） |
-| `quality_results` | 质量证据（按 task_id + retry_count 索引） |
-| `agent_outcomes` | Agent 执行结果（按 agent_id + capability 聚合） |
+- Agent: `register()`, `discover()`, `heartbeat_agent()`
+- Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `fail_task()`, `cancel_task()`
+- Quality: `submit_quality_result()`, `preview_quality_gate()`, `preview_task_readiness()`
+- Plan: `create_plan()`, `activate_plan()`, `close_plan()`, `list_plans()`
+- Dependency: `list_ready_tasks()`
+- Handoff: `save_handoff_result()`, `get_handoff_result()`
+- Conflict: `record_conflict()`, `list_conflicts()`, `resolve_conflict()`
+- Packet: `prepare_worker_packet()`, `prepare_review_packet()`
 
-WAL 模式启用，支持单实例高并发读写。
-
----
-
-## 6. 错误码
-
-| 错误码 | 含义 |
-|--------|------|
-| `StateConflictError` | 状态转换冲突（CAS 失败） |
-| `QualityGateError` | quality gate 未通过 |
-| `TaskExpiredError` | TTL 过期 |
-| `MaxHopsExceededError` | 超过最大跳数 |
-| `StatusConflict` | SQLite 层 CAS 失败（storage 内） |
+CLI and HTTP adapters are thin wrappers around this API.
 
 ---
 
-## 7. Phase 状态
+## 7. SQLite Ledger
 
-| Phase | 内容 | 状态 |
-|-------|------|------|
-| 1.0–1.8 | MVP 完成 | ✅ |
-| 1.9 | Failure recovery (checkpoint/retry/cancel) + TaskEventBus | ✅ |
-| 2 | gRPC、Redis、PostgreSQL、Cloud Bridge | 延期 |
+Tables:
+
+| Table | Purpose |
+|-------|---------|
+| `agent_cards` | Agent card JSON plus indexed status/load/capability metadata |
+| `task_transfers` | Task JSON plus indexed status/project context |
+| `audit_entries` | Append-only task audit events |
+| `quality_results` | Quality evidence by task and retry attempt |
+| `agent_outcomes` | Observed capability outcomes |
+| `plans` | Plan JSON and plan status |
+| `handoff_results` | Structured handoff JSON by task |
+| `conflict_records` | Conflict JSON and resolved index |
+
+SQLite WAL mode is enabled. Phase A is intended for a local single-workspace setup.
 
 ---
 
-## 8. 已知约束
+## 8. Deferred Work
 
-- SQLite WAL 单实例；多实例强一致性延期至 Phase 2 PostgreSQL
-- ContextBundle 质量决定 handoff 质量；MAC 强制结构，不强制理解
-- Quality Gate 检查证据是否满足合同，不评判测试本身质量
-- Observed capability metrics 是观察值，不是认证或 SLA
-
----
-
-*设计文档 v1.5，与 README（用户入口）、CLAUDE.md（AI agent 指南）同步更新。*
+- Review lifecycle states (`review_ready`, `accept_review`, `reject_review`) behind a policy switch.
+- Leases, daemon workers, and automatic external-agent execution.
+- Parallel group planning and DAG visualization.
+- Redis, Postgres, gRPC, and cloud synchronization.
+- Automatic conflict resolution.
+- Project-specific role presets.

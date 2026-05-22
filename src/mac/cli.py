@@ -20,6 +20,8 @@ def _build_parser() -> argparse.ArgumentParser:
     register.add_argument("--capability", action="append", required=True)
     register.add_argument("--project-context")
     register.add_argument("--load", type=int, default=0)
+    register.add_argument("--allowed-path", action="append", default=[])
+    register.add_argument("--forbidden-path", action="append", default=[])
 
     discover = subcommands.add_parser("discover", help="Discover agents by capability")
     discover.add_argument("--db", default="mac.db")
@@ -38,6 +40,8 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--coverage-goal", type=int)
     submit.add_argument("--risk", choices=["low", "medium", "high"])
     submit.add_argument("--context-ref", action="append", default=[])
+    submit.add_argument("--plan-id")
+    submit.add_argument("--depends-on", action="append", default=[])
 
     status = subcommands.add_parser("status", help="Print task status")
     status.add_argument("--db", default="mac.db")
@@ -49,6 +53,71 @@ def _build_parser() -> argparse.ArgumentParser:
     tasks.add_argument("--capability")
     tasks.add_argument("--agent-id")
     tasks.add_argument("--project-context")
+
+    plan = subcommands.add_parser("plan", help="Manage collaboration plans")
+    plan_subcommands = plan.add_subparsers(dest="plan_command", required=True)
+    plan_create = plan_subcommands.add_parser("create", help="Create a collaboration plan")
+    plan_create.add_argument("--db", default="mac.db")
+    plan_create.add_argument("--plan-id")
+    plan_create.add_argument("--goal", required=True)
+    plan_create.add_argument("--created-by", default="")
+    plan_activate = plan_subcommands.add_parser("activate", help="Activate a collaboration plan")
+    plan_activate.add_argument("--db", default="mac.db")
+    plan_activate.add_argument("--plan-id", required=True)
+    plan_close = plan_subcommands.add_parser("close", help="Close a collaboration plan")
+    plan_close.add_argument("--db", default="mac.db")
+    plan_close.add_argument("--plan-id", required=True)
+    plan_close.add_argument("--status", choices=["completed", "cancelled"], default="completed")
+    plan_list = plan_subcommands.add_parser("list", help="List collaboration plans")
+    plan_list.add_argument("--db", default="mac.db")
+    plan_list.add_argument("--status")
+
+    ready_tasks = subcommands.add_parser("ready-tasks", help="List dependency-unblocked proposed tasks")
+    ready_tasks.add_argument("--db", default="mac.db")
+    ready_tasks.add_argument("--agent-id")
+    ready_tasks.add_argument("--capability")
+    ready_tasks.add_argument("--project-context")
+
+    handoff = subcommands.add_parser("handoff", help="Save or print a structured task handoff")
+    handoff.add_argument("--db", default="mac.db")
+    handoff.add_argument("--task-id", required=True)
+    handoff.add_argument("--agent-id")
+    handoff.add_argument("--plan-id")
+    handoff.add_argument("--verification", action="append", default=[])
+    handoff.add_argument("--changed-file", action="append", default=[])
+    handoff.add_argument("--doc", action="append", default=[])
+    handoff.add_argument("--risk", action="append", default=[])
+
+    record_conflict = subcommands.add_parser("record-conflict", help="Record a collaboration conflict")
+    record_conflict.add_argument("--db", default="mac.db")
+    record_conflict.add_argument("--conflict-id")
+    record_conflict.add_argument("--plan-id")
+    record_conflict.add_argument("--task-id")
+    record_conflict.add_argument("--source", required=True)
+    record_conflict.add_argument("--severity", choices=["blocking", "non_blocking"], default="non_blocking")
+    record_conflict.add_argument("--description", required=True)
+    record_conflict.add_argument("--agent", action="append", default=[])
+    record_conflict.add_argument("--file", action="append", default=[])
+
+    conflicts = subcommands.add_parser("conflicts", help="List collaboration conflicts")
+    conflicts.add_argument("--db", default="mac.db")
+    conflicts.add_argument("--plan-id")
+    conflicts.add_argument("--resolved", action="store_true")
+    conflicts.add_argument("--unresolved", action="store_true")
+
+    resolve_conflict = subcommands.add_parser("resolve-conflict", help="Resolve a collaboration conflict")
+    resolve_conflict.add_argument("--db", default="mac.db")
+    resolve_conflict.add_argument("--conflict-id", required=True)
+    resolve_conflict.add_argument("--resolution", required=True)
+
+    worker_packet = subcommands.add_parser("worker-packet", help="Print a worker task packet")
+    worker_packet.add_argument("--db", default="mac.db")
+    worker_packet.add_argument("--task-id", required=True)
+    worker_packet.add_argument("--agent-id")
+
+    review_packet = subcommands.add_parser("review-packet", help="Print a review task packet")
+    review_packet.add_argument("--db", default="mac.db")
+    review_packet.add_argument("--task-id", required=True)
 
     task_evidence = subcommands.add_parser("task-evidence", help="Print a task evidence bundle")
     task_evidence.add_argument("--db", default="mac.db")
@@ -151,6 +220,13 @@ def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
 
 
+def _parse_verification(value: str):
+    from mac.protocol.messages import VerificationEntry
+
+    command, result, description = (value.split(":", 2) + ["", ""])[:3]
+    return VerificationEntry(command=command, result=result, description=description)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -173,6 +249,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             capabilities=[AgentCapability(name=name) for name in args.capability],
             load=args.load,
             project_context=args.project_context,
+            allowed_paths=args.allowed_path,
+            forbidden_paths=args.forbidden_path,
         )
         registry.register(card)
         _print_json({"agent_id": card.agent_id, "status": "registered"})
@@ -209,6 +287,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload=payload,
             context=ContextBundle(summary=args.summary, artifact_refs=args.context_ref),
             test_contract=TestContract.for_risk(args.risk) if args.risk else None,
+            plan_id=args.plan_id,
+            depends_on=args.depends_on,
         )
         registry = Registry(SQLiteStorage(Path(args.db)))
         _print_json(registry.submit_task(task).model_dump(mode="json"))
@@ -233,6 +313,119 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_context=args.project_context,
         )
         _print_json([task.model_dump(mode="json") for task in tasks])
+        return 0
+
+    if args.command == "plan":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        if args.plan_command == "create":
+            plan = registry.create_plan(goal=args.goal, created_by=args.created_by, plan_id=args.plan_id)
+            _print_json(plan.model_dump(mode="json"))
+            return 0
+        if args.plan_command == "activate":
+            plan = registry.activate_plan(args.plan_id)
+            _print_json(plan.model_dump(mode="json"))
+            return 0
+        if args.plan_command == "close":
+            plan = registry.close_plan(args.plan_id, status=args.status)
+            _print_json(plan.model_dump(mode="json"))
+            return 0
+        if args.plan_command == "list":
+            plans = registry.list_plans(status=args.status)
+            _print_json([plan.model_dump(mode="json") for plan in plans])
+            return 0
+
+    if args.command == "ready-tasks":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        tasks = Registry(SQLiteStorage(Path(args.db))).list_ready_tasks(
+            agent_id=args.agent_id,
+            capability=args.capability,
+            project_context=args.project_context,
+        )
+        _print_json([task.model_dump(mode="json") for task in tasks])
+        return 0
+
+    if args.command == "handoff":
+        from mac.protocol.messages import HandoffResult
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        if args.agent_id is None:
+            handoff_result = registry.get_handoff_result(args.task_id)
+            _print_json(handoff_result.model_dump(mode="json") if handoff_result is not None else None)
+            return 0
+        handoff_result = HandoffResult(
+            task_id=args.task_id,
+            plan_id=args.plan_id,
+            agent_id=args.agent_id,
+            verification=[_parse_verification(value) for value in args.verification],
+            changed_files=args.changed_file,
+            docs_touched=args.doc,
+            risks=args.risk,
+        )
+        saved = registry.save_handoff_result(handoff_result)
+        _print_json(saved.model_dump(mode="json"))
+        return 0
+
+    if args.command == "record-conflict":
+        from mac.protocol.messages import ConflictRecord
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        conflict_data = {
+            "plan_id": args.plan_id,
+            "task_id": args.task_id,
+            "source": args.source,
+            "severity": args.severity,
+            "description": args.description,
+            "involved_agents": args.agent,
+            "involved_files": args.file,
+        }
+        if args.conflict_id:
+            conflict_data["conflict_id"] = args.conflict_id
+        conflict = ConflictRecord(**conflict_data)
+        recorded = Registry(SQLiteStorage(Path(args.db))).record_conflict(conflict)
+        _print_json(recorded.model_dump(mode="json"))
+        return 0
+
+    if args.command == "conflicts":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        resolved = None
+        if args.resolved:
+            resolved = True
+        if args.unresolved:
+            resolved = False
+        conflicts = Registry(SQLiteStorage(Path(args.db))).list_conflicts(plan_id=args.plan_id, resolved=resolved)
+        _print_json([conflict.model_dump(mode="json") for conflict in conflicts])
+        return 0
+
+    if args.command == "resolve-conflict":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        conflict = Registry(SQLiteStorage(Path(args.db))).resolve_conflict(args.conflict_id, args.resolution)
+        _print_json(conflict.model_dump(mode="json"))
+        return 0
+
+    if args.command == "worker-packet":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        print(Registry(SQLiteStorage(Path(args.db))).prepare_worker_packet(args.task_id, agent_id=args.agent_id), end="")
+        return 0
+
+    if args.command == "review-packet":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        print(Registry(SQLiteStorage(Path(args.db))).prepare_review_packet(args.task_id), end="")
         return 0
 
     if args.command == "task-evidence":

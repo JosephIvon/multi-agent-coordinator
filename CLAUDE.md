@@ -1,6 +1,6 @@
 # MAC — AI Agent Guide
 
-**Version:** 0.1.4
+**Version:** 0.2.0
 **Language:** English (technical authority)
 **Last updated:** 2026-05-22
 
@@ -10,7 +10,7 @@
 
 MAC is a lightweight coordination layer for AI coding agents — a task ledger, context broker, quality gate, and handoff protocol for multi-agent Python development.
 
-- **Version:** 0.1.4 (see `src/mac/__init__.py` and `pyproject.toml`)
+- **Version:** 0.2.0 (see `src/mac/__init__.py` and `pyproject.toml`)
 - **License:** MIT
 - **Python:** >=3.10
 
@@ -20,14 +20,14 @@ MAC is a lightweight coordination layer for AI coding agents — a task ledger, 
 
 ```
 src/mac/
-├── __init__.py          # __version__ = "0.1.4"
-├── cli.py               # 20 subcommands, entry point
+├── __init__.py          # __version__ = "0.2.0"
+├── cli.py               # Entry point: lifecycle + collaboration subcommands
 ├── events.py            # TaskEventBus (sync + asyncio queue)
 ├── protocol/
 │   ├── __init__.py
 │   ├── constants.py
 │   ├── errors.py        # MACError hierarchy (StateConflictError, QualityGateError, etc.)
-│   └── messages.py      # Pydantic models — AUTHORITATIVE (not storage/models.py)
+│   └── messages.py      # Pydantic models — AUTHORITATIVE (Plan, TaskTransfer, HandoffResult, ConflictRecord)
 ├── quality/
 │   ├── __init__.py
 │   └── gate.py          # evaluate_quality_gate()
@@ -144,18 +144,29 @@ Also: `cancelled`, `superseded`.
 
 ---
 
-## CLI Commands (20 subcommands)
+## CLI Commands (25 subcommands)
 
 `mac-agent <command> [options]`
 
 | Command | Description |
 |---------|-------------|
 | `contract --risk {low,medium,high}` | Generate risk-based TestContract |
-| `register --agent-id ... --name ... --capability ...` | Register agent |
+| `register --agent-id ... --name ... --capability ... [--allowed-path ...] [--forbidden-path ...]` | Register agent |
 | `discover --capability ...` | Find agents by capability |
-| `submit --task-id ... --type ... --summary ...` | Submit task |
+| `submit --task-id ... --type ... --summary ... [--plan-id ...] [--depends-on ...] [--risk ...]` | Submit task |
 | `status --task-id ...` | Print task status |
 | `tasks [--status] [--capability] [--agent-id] [--project-context]` | List tasks (read-only) |
+| `plan create --plan-id ... --goal ... --created-by ...` | Create collaboration plan |
+| `plan activate --plan-id ...` | Activate plan |
+| `plan close --plan-id ... [--status completed\|cancelled]` | Close plan |
+| `plan list` | List plans |
+| `ready-tasks [--capability ...]` | List dependency-unblocked proposed tasks |
+| `handoff --task-id ... --agent-id ... [--plan-id ...] [--verification ...] [--changed-file ...] [--risk ...]` | Save or print structured handoff |
+| `record-conflict --source ... --description ... [--plan-id ...] [--task-id ...] [--severity ...]` | Record a conflict |
+| `conflicts [--plan-id ...] [--resolved] [--unresolved]` | List conflicts |
+| `resolve-conflict --conflict-id ... --resolution ...` | Resolve a conflict |
+| `worker-packet --task-id ... --agent-id ...` | Print worker packet (Markdown) |
+| `review-packet --task-id ...` | Print review packet (Markdown) |
 | `task-evidence --task-id ...` | Print task evidence bundle (read-only) |
 | `quality-preview --task-id ...` | Preview quality gate (read-only) |
 | `task-readiness --task-id ...` | Preview next action (read-only) |
@@ -179,6 +190,7 @@ Also: `cancelled`, `superseded`.
 
 - **Phase 1.0–1.8**: Complete. Local MVP with SQLite ledger, CLI, HTTP, in-process adapter, task claiming, adapter templates, task visibility, evidence bundles, quality gate preview, and task readiness preview.
 - **Phase 1.9** (integrated): Failure recovery (`checkpoint`, `retry`, `cancel`), TaskEventBus.
+- **Phase A** (v0.2.0, current): Collaboration layer — Plan management, `depends_on` dependency tracking, `list_ready_tasks()`, `HandoffResult`, `ConflictRecord`, `PathRule`/`CoordinationPolicy`, `prepare_worker_packet()`/`prepare_review_packet()`, path guardrails, CLI collaboration commands (`ready-tasks`, `handoff`, `conflicts`, `record-conflict`, `resolve-conflict`, `worker-packet`, `review-packet`).
 - **Phase 2** (deferred): gRPC, Redis Pub/Sub, PostgreSQL, Cloud Bridge, Hybrid Bridge.
 
 ---
@@ -237,8 +249,10 @@ python -m compileall -q src examples
 
 Any code change that modifies public API, CLI commands, HTTP endpoints, or architecture **MUST** update all three documents in the same commit:
 
-- `README.md` — install, quick start, API example
+- `README.md` — install, quick start, API example (English section + Chinese section)
 - `docs/SPEC.md` — architecture, endpoints, phase status
 - `CLAUDE.md` — this file
 
 No document shall reference code that does not exist.
+
+Documents are organized by language: English content first, Chinese content after the `====` separator. Both sections must be kept in sync.

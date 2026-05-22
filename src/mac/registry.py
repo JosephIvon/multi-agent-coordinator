@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import fnmatch
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from mac.events import TaskEvent, TaskEventBus
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
+    ConflictRecord,
+    HandoffResult,
+    PathRule,
+    Plan,
     AuditEntry,
     QualityGatePreview,
     TaskEvidenceBundle,
@@ -79,7 +85,11 @@ class Registry:
         return [_with_selection_metadata(agent, capability_score=score) for agent, score in ranked]
 
     def submit_task(self, task: TaskTransfer) -> TaskTransfer:
+        if task.plan_id and self.ledger.get_plan(task.plan_id) is None:
+            raise KeyError(task.plan_id)
         self.ledger.save_task_transfer(task)
+        if task.plan_id:
+            self._add_task_to_plan(task.plan_id, task.task_id)
         actor = task.source_agent_id or ""
         self._audit(task, "submit_task", actor)
         self._publish(task, "task_submitted", actor=actor, to_status=task.status)
@@ -127,6 +137,7 @@ class Registry:
             execution_agent_id=execution_agent_id,
             required_capability=required_capability,
             observed_capability_score=observed_capability_score,
+            handoff_result=self.get_handoff_result(task.task_id),
         )
 
     def preview_quality_gate(self, task_id: str) -> QualityGatePreview | None:
@@ -272,6 +283,192 @@ class Registry:
             raise QualityGateError(reason or "quality_gate_failed")
         return self._transition(task_id, "completed", expected_status="running", agent_id=agent_id, action="complete_task")
 
+    def create_plan(
+        self,
+        *,
+        goal: str,
+        created_by: str = "",
+        plan_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Plan:
+        if plan_id is not None and self.ledger.get_plan(plan_id) is not None:
+            raise StateConflictError(f"Plan {plan_id!r} already exists.")
+        plan = Plan(plan_id=plan_id or str(uuid4()), goal=goal, created_by=created_by, metadata=metadata or {})
+        self.ledger.save_plan(plan)
+        self._publish_plan(plan, "plan_created", actor=created_by)
+        return plan
+
+    def get_plan(self, plan_id: str) -> Plan | None:
+        return self.ledger.get_plan(plan_id)
+
+    def list_plans(self, *, status: str | None = None) -> list[Plan]:
+        return self.ledger.list_plans(status=status)
+
+    def activate_plan(self, plan_id: str) -> Plan:
+        plan = self._get_plan(plan_id)
+        if plan.status != "draft":
+            raise StateConflictError(f"Plan {plan_id!r} status is {plan.status!r}, expected 'draft'.")
+        updated = plan.model_copy(update={"status": "active"})
+        self.ledger.save_plan(updated)
+        self._publish_plan(updated, "plan_activated")
+        return updated
+
+    def close_plan(self, plan_id: str, *, status: str = "completed") -> Plan:
+        if status not in {"completed", "cancelled"}:
+            raise ValueError("close_plan status must be 'completed' or 'cancelled'")
+        plan = self._get_plan(plan_id)
+        if plan.status not in {"draft", "active"}:
+            raise StateConflictError(f"Plan {plan_id!r} status is {plan.status!r}; cannot close.")
+        updated = plan.model_copy(
+            update={
+                "status": status,
+                "closed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self.ledger.save_plan(updated)
+        self._publish_plan(updated, "plan_closed", to_status=status)
+        return updated
+
+    def list_ready_tasks(
+        self,
+        *,
+        agent_id: str | None = None,
+        capability: str | None = None,
+        project_context: str | None = None,
+    ) -> list[TaskTransfer]:
+        tasks = self.ledger.list_task_transfers(status="proposed", project_context=project_context)
+        ready = []
+        for task in tasks:
+            if agent_id is not None and task.target_agent_id is not None and task.target_agent_id != agent_id:
+                continue
+            if capability is not None and _required_capability(task) != capability:
+                continue
+            if not self._dependencies_satisfied(task):
+                continue
+            ready.append(task)
+        return ready
+
+    def save_handoff_result(
+        self,
+        handoff: HandoffResult,
+        *,
+        path_rule: PathRule | None = None,
+    ) -> HandoffResult:
+        task = self._get_task(handoff.task_id)
+        if handoff.plan_id is None and task.plan_id is not None:
+            handoff = handoff.model_copy(update={"plan_id": task.plan_id})
+        normalized = self._apply_path_guardrails(handoff, path_rule or PathRule())
+        self.ledger.save_handoff_result(normalized)
+        self._audit(task, "save_handoff_result", normalized.agent_id)
+        self._publish(task, "handoff_saved", actor=normalized.agent_id, payload={"boundary_review": normalized.boundary_review})
+        return normalized
+
+    def get_handoff_result(self, task_id: str) -> HandoffResult | None:
+        return self.ledger.get_handoff_result(task_id)
+
+    def record_conflict(self, conflict: ConflictRecord) -> ConflictRecord:
+        recorded = self.ledger.record_conflict(conflict)
+        self._publish_conflict(recorded, "conflict_recorded")
+        return recorded
+
+    def list_conflicts(
+        self,
+        *,
+        plan_id: str | None = None,
+        resolved: bool | None = None,
+    ) -> list[ConflictRecord]:
+        return self.ledger.list_conflicts(plan_id=plan_id, resolved=resolved)
+
+    def resolve_conflict(self, conflict_id: str, resolution: str) -> ConflictRecord:
+        resolved = self.ledger.resolve_conflict(conflict_id, resolution)
+        self._publish_conflict(resolved, "conflict_resolved")
+        return resolved
+
+    def prepare_worker_packet(self, task_id: str, *, agent_id: str | None = None) -> str:
+        task = self._get_task(task_id)
+        agent = self.get_agent(agent_id) if agent_id else None
+        dependencies = self._dependency_lines(task)
+        lines = [
+            f"# Worker Task: {task.task_id}",
+            "",
+            "## Goal",
+            task.context.summary if task.context is not None else task.title or task.description,
+            "",
+            "## Task",
+            f"- Status: {task.status}",
+            f"- Capability: {_required_capability(task)}",
+            f"- Priority: {task.priority}",
+        ]
+        if task.plan_id:
+            lines.append(f"- Plan: {task.plan_id}")
+        if agent is not None:
+            lines.extend(
+                [
+                    "",
+                    "## Agent Boundary",
+                    f"- Agent: {agent.agent_id}",
+                    f"- Allowed paths: {_format_list(agent.allowed_paths)}",
+                    f"- Forbidden paths: {_format_list(agent.forbidden_paths)}",
+                ]
+            )
+        lines.extend(["", "## Depends On"])
+        lines.extend(dependencies or ["- None"])
+        lines.extend(
+            [
+                "",
+                "## Acceptance Criteria",
+            ]
+        )
+        criteria = list(getattr(task.context, "acceptance_criteria", []) or [])
+        lines.extend([f"- {item}" for item in criteria] or ["- Complete the task and submit structured handoff evidence."])
+        lines.extend(
+            [
+                "",
+                "## Handoff Format",
+                "- verification: command/result/description",
+                "- changed_files: files changed by this task",
+                "- docs_touched: docs updated by this task",
+                "- risks: residual risks or follow-up checks",
+            ]
+        )
+        return "\n".join(lines).strip() + "\n"
+
+    def prepare_review_packet(self, task_id: str) -> str:
+        task = self._get_task(task_id)
+        handoff = self.get_handoff_result(task_id)
+        conflicts = self.list_conflicts(plan_id=task.plan_id, resolved=False) if task.plan_id else []
+        task_conflicts = [conflict for conflict in conflicts if conflict.task_id in {None, task_id}]
+        lines = [
+            f"# Review Task: {task.task_id}",
+            "",
+            "## Task",
+            f"- Status: {task.status}",
+            f"- Capability: {_required_capability(task)}",
+        ]
+        if handoff is None:
+            lines.extend(["", "## HandoffResult", "- None"])
+        else:
+            lines.extend(
+                [
+                    "",
+                    "## HandoffResult",
+                    f"- Agent: {handoff.agent_id}",
+                    f"- Boundary review: {handoff.boundary_review}",
+                    f"- Changed files: {_format_list(handoff.changed_files)}",
+                    f"- Docs touched: {_format_list(handoff.docs_touched)}",
+                    f"- Risks: {_format_list(handoff.risks)}",
+                    "",
+                    "## Verification",
+                ]
+            )
+            lines.extend(
+                [f"- `{entry.command}`: {entry.result} {entry.description}".rstrip() for entry in handoff.verification]
+                or ["- None"]
+            )
+        lines.extend(["", "## Open Conflicts"])
+        lines.extend([f"- {conflict.conflict_id}: {conflict.description}" for conflict in task_conflicts] or ["- None"])
+        return "\n".join(lines).strip() + "\n"
+
     def claim_next_task(
         self,
         *,
@@ -284,6 +481,8 @@ class Registry:
         candidates = []
         for index, task in enumerate(tasks):
             if task.target_agent_id is not None and task.target_agent_id != agent_id:
+                continue
+            if not self._dependencies_satisfied(task):
                 continue
             required_capability = _required_capability(task)
             if not best_effort and required_capability != capability:
@@ -389,6 +588,60 @@ class Registry:
             raise KeyError(task_id)
         return task
 
+    def _get_plan(self, plan_id: str) -> Plan:
+        plan = self.ledger.get_plan(plan_id)
+        if plan is None:
+            raise KeyError(plan_id)
+        return plan
+
+    def _add_task_to_plan(self, plan_id: str, task_id: str) -> None:
+        plan = self.ledger.get_plan(plan_id)
+        if plan is None:
+            return
+        if task_id in plan.task_ids:
+            return
+        updated = plan.model_copy(update={"task_ids": [*plan.task_ids, task_id]})
+        self.ledger.save_plan(updated)
+
+    def _dependencies_satisfied(self, task: TaskTransfer) -> bool:
+        for dependency_id in task.depends_on:
+            dependency = self.ledger.get_task_transfer(dependency_id)
+            if dependency is None or dependency.status not in {"completed", "cancelled"}:
+                return False
+        return True
+
+    def _dependency_lines(self, task: TaskTransfer) -> list[str]:
+        lines = []
+        for dependency_id in task.depends_on:
+            dependency = self.ledger.get_task_transfer(dependency_id)
+            if dependency is None:
+                lines.append(f"- {dependency_id}: missing")
+            else:
+                note = " (cancelled: verify downstream still makes sense)" if dependency.status == "cancelled" else ""
+                lines.append(f"- {dependency_id}: {dependency.status}{note}")
+        return lines
+
+    def _apply_path_guardrails(self, handoff: HandoffResult, path_rule: PathRule) -> HandoffResult:
+        agent = self.get_agent(handoff.agent_id)
+        violations = _path_violations(handoff, agent=agent, path_rule=path_rule)
+        if not violations:
+            if handoff.boundary_review == "block":
+                return handoff.model_copy(update={"boundary_review": "pass", "violated_guardrail": []})
+            return handoff
+        blocked = handoff.model_copy(update={"boundary_review": "block", "violated_guardrail": violations})
+        self.record_conflict(
+            ConflictRecord(
+                plan_id=blocked.plan_id,
+                task_id=blocked.task_id,
+                source="path_violation",
+                severity="blocking",
+                description="Handoff changed files outside configured path guardrails.",
+                involved_agents=[blocked.agent_id],
+                involved_files=blocked.changed_files,
+            )
+        )
+        return blocked
+
     def _audit(
         self,
         task: TaskTransfer,
@@ -433,6 +686,44 @@ class Registry:
                 from_status=from_status,
                 to_status=to_status,
                 payload=payload or {},
+            )
+        )
+
+    def _publish_plan(
+        self,
+        plan: Plan,
+        event_type: str,
+        *,
+        actor: str = "",
+        to_status: str | None = None,
+    ) -> None:
+        if self.event_bus is None:
+            return
+        self.event_bus.publish(
+            TaskEvent(
+                type=event_type,
+                task_id="",
+                trace_id=plan.plan_id,
+                actor=actor or plan.created_by,
+                to_status=to_status or plan.status,
+                payload={"plan_id": plan.plan_id, "goal": plan.goal},
+            )
+        )
+
+    def _publish_conflict(self, conflict: ConflictRecord, event_type: str) -> None:
+        if self.event_bus is None:
+            return
+        self.event_bus.publish(
+            TaskEvent(
+                type=event_type,
+                task_id=conflict.task_id or "",
+                trace_id=conflict.plan_id or conflict.conflict_id,
+                actor="",
+                payload={
+                    "conflict_id": conflict.conflict_id,
+                    "plan_id": conflict.plan_id,
+                    "resolved": conflict.resolved,
+                },
             )
         )
 
@@ -559,6 +850,42 @@ def _unique(items: Any) -> list[str]:
         seen.add(item)
         values.append(item)
     return values
+
+
+def _path_violations(
+    handoff: HandoffResult,
+    *,
+    agent: Any | None,
+    path_rule: PathRule,
+) -> list[str]:
+    allowed_patterns: list[str] = []
+    forbidden_patterns: list[str] = []
+    if agent is not None:
+        allowed_patterns.extend(getattr(agent, "allowed_paths", []) or [])
+        forbidden_patterns.extend(getattr(agent, "forbidden_paths", []) or [])
+    allowed_patterns.extend(path_rule.allowed_patterns)
+    forbidden_patterns.extend(path_rule.forbidden_patterns)
+    if path_rule.allow_all and not allowed_patterns and not forbidden_patterns:
+        return []
+
+    violations = []
+    for changed_file in handoff.changed_files:
+        normalized = changed_file.replace("\\", "/")
+        for pattern in forbidden_patterns:
+            if _glob_match(normalized, pattern):
+                violations.append(f"forbidden:{changed_file}:{pattern}")
+        if allowed_patterns and not any(_glob_match(normalized, pattern) for pattern in allowed_patterns):
+            violations.append(f"not_allowed:{changed_file}")
+    return violations
+
+
+def _glob_match(path: str, pattern: str) -> bool:
+    normalized_pattern = pattern.replace("\\", "/")
+    return fnmatch.fnmatch(path, normalized_pattern)
+
+
+def _format_list(values: list[str]) -> str:
+    return ", ".join(values) if values else "None"
 
 
 def _now_id() -> str:

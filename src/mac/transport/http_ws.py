@@ -8,6 +8,9 @@ from pydantic import BaseModel
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
     AgentCard,
+    ConflictRecord,
+    HandoffResult,
+    Plan,
     QualityGatePreview,
     TaskEvidenceBundle,
     TaskReadinessReport,
@@ -53,6 +56,21 @@ class CancelTaskRequest(BaseModel):
     reason: str = ""
 
 
+class CreatePlanRequest(BaseModel):
+    plan_id: str | None = None
+    goal: str
+    created_by: str = ""
+    metadata: dict[str, Any] | None = None
+
+
+class ClosePlanRequest(BaseModel):
+    status: str = "completed"
+
+
+class ResolveConflictRequest(BaseModel):
+    resolution: str
+
+
 def create_app(registry: Registry) -> FastAPI:
     app = FastAPI(title="Multi-Agent Coordinator")
 
@@ -95,6 +113,18 @@ def create_app(registry: Registry) -> FastAPI:
     def submit_task(task: TaskTransfer) -> TaskTransfer:
         return registry.submit_task(task)
 
+    @app.get("/tasks/ready")
+    def list_ready_tasks(
+        agent_id: str | None = None,
+        capability: str | None = None,
+        project_context: str | None = None,
+    ) -> list[TaskTransfer]:
+        return registry.list_ready_tasks(
+            agent_id=agent_id,
+            capability=capability,
+            project_context=project_context,
+        )
+
     @app.get("/tasks")
     def list_tasks(
         status: str | None = None,
@@ -116,12 +146,77 @@ def create_app(registry: Registry) -> FastAPI:
             raise HTTPException(status_code=404, detail=task_id)
         return task
 
+    @app.post("/plans", status_code=201)
+    def create_plan(request: CreatePlanRequest) -> Plan:
+        return registry.create_plan(
+            goal=request.goal,
+            created_by=request.created_by,
+            plan_id=request.plan_id,
+            metadata=request.metadata,
+        )
+
+    @app.get("/plans")
+    def list_plans(status: str | None = None) -> list[Plan]:
+        return registry.list_plans(status=status)
+
+    @app.get("/plans/{plan_id}")
+    def get_plan(plan_id: str) -> Plan:
+        plan = registry.get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail=plan_id)
+        return plan
+
+    @app.post("/plans/{plan_id}/activate")
+    def activate_plan(plan_id: str) -> Plan:
+        return _call_task(lambda: registry.activate_plan(plan_id))
+
+    @app.post("/plans/{plan_id}/close")
+    def close_plan(plan_id: str, request: ClosePlanRequest | None = None) -> Plan:
+        status = request.status if request is not None else "completed"
+        return _call_task(lambda: registry.close_plan(plan_id, status=status))
+
     @app.get("/tasks/{task_id}/evidence")
     def get_task_evidence(task_id: str) -> TaskEvidenceBundle:
         bundle = registry.get_task_evidence(task_id)
         if bundle is None:
             raise HTTPException(status_code=404, detail=task_id)
         return bundle
+
+    @app.post("/handoffs", status_code=201)
+    def save_handoff_result(handoff: HandoffResult) -> HandoffResult:
+        return _call_task(lambda: registry.save_handoff_result(handoff))
+
+    @app.get("/tasks/{task_id}/handoff")
+    def get_handoff_result(task_id: str) -> HandoffResult:
+        handoff = registry.get_handoff_result(task_id)
+        if handoff is None:
+            raise HTTPException(status_code=404, detail=task_id)
+        return handoff
+
+    @app.post("/conflicts", status_code=201)
+    def record_conflict(conflict: ConflictRecord) -> ConflictRecord:
+        return registry.record_conflict(conflict)
+
+    @app.get("/conflicts")
+    def list_conflicts(
+        plan_id: str | None = None,
+        resolved: bool | None = None,
+    ) -> list[ConflictRecord]:
+        return registry.list_conflicts(plan_id=plan_id, resolved=resolved)
+
+    @app.post("/conflicts/{conflict_id}/resolve")
+    def resolve_conflict(conflict_id: str, request: ResolveConflictRequest) -> ConflictRecord:
+        return _call_task(lambda: registry.resolve_conflict(conflict_id, request.resolution))
+
+    @app.get("/tasks/{task_id}/worker-packet")
+    def worker_packet(task_id: str, agent_id: str | None = None) -> Response:
+        packet = _call_task(lambda: registry.prepare_worker_packet(task_id, agent_id=agent_id))
+        return Response(content=packet, media_type="text/markdown")
+
+    @app.get("/tasks/{task_id}/review-packet")
+    def review_packet(task_id: str) -> Response:
+        packet = _call_task(lambda: registry.prepare_review_packet(task_id))
+        return Response(content=packet, media_type="text/markdown")
 
     @app.get("/tasks/{task_id}/quality-preview")
     def preview_quality_gate(task_id: str) -> QualityGatePreview:

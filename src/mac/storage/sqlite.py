@@ -149,6 +149,143 @@ class SQLiteTaskLedger:
         )
         return [_from_dict("TaskTransfer", json.loads(row["payload"])) for row in rows]
 
+    def save_plan(self, plan: Any) -> None:
+        data = _to_dict(plan)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO plans (
+                    plan_id, status, created_at, payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(plan_id) DO UPDATE SET
+                    status = excluded.status,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    data["plan_id"],
+                    data.get("status"),
+                    data.get("created_at") or _now(),
+                    _json(data),
+                    _now(),
+                ),
+            )
+
+    def get_plan(self, plan_id: str) -> Any | None:
+        row = self._fetch_one("SELECT payload FROM plans WHERE plan_id = ?", plan_id)
+        if row is None:
+            return None
+        return _from_dict("Plan", json.loads(row["payload"]))
+
+    def list_plans(self, *, status: str | None = None) -> list[Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetch_all(
+            f"SELECT payload FROM plans {where} ORDER BY created_at ASC, plan_id ASC",
+            *params,
+        )
+        return [_from_dict("Plan", json.loads(row["payload"])) for row in rows]
+
+    def save_handoff_result(self, handoff: Any) -> None:
+        data = _to_dict(handoff)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO handoff_results (
+                    task_id, plan_id, agent_id, payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    plan_id = excluded.plan_id,
+                    agent_id = excluded.agent_id,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    data["task_id"],
+                    data.get("plan_id"),
+                    data.get("agent_id"),
+                    _json(data),
+                    _now(),
+                ),
+            )
+
+    def get_handoff_result(self, task_id: str) -> Any | None:
+        row = self._fetch_one("SELECT payload FROM handoff_results WHERE task_id = ?", task_id)
+        if row is None:
+            return None
+        return _from_dict("HandoffResult", json.loads(row["payload"]))
+
+    def record_conflict(self, conflict: Any) -> Any:
+        data = _to_dict(conflict)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO conflict_records (
+                    conflict_id, plan_id, task_id, source, severity, resolved, payload, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conflict_id) DO UPDATE SET
+                    plan_id = excluded.plan_id,
+                    task_id = excluded.task_id,
+                    source = excluded.source,
+                    severity = excluded.severity,
+                    resolved = excluded.resolved,
+                    payload = excluded.payload,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    data["conflict_id"],
+                    data.get("plan_id"),
+                    data.get("task_id"),
+                    data.get("source"),
+                    data.get("severity"),
+                    1 if data.get("resolved") else 0,
+                    _json(data),
+                    _now(),
+                ),
+            )
+        return _from_dict("ConflictRecord", data)
+
+    def get_conflict(self, conflict_id: str) -> Any | None:
+        row = self._fetch_one("SELECT payload FROM conflict_records WHERE conflict_id = ?", conflict_id)
+        if row is None:
+            return None
+        return _from_dict("ConflictRecord", json.loads(row["payload"]))
+
+    def list_conflicts(
+        self,
+        *,
+        plan_id: str | None = None,
+        resolved: bool | None = None,
+    ) -> list[Any]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if plan_id is not None:
+            clauses.append("plan_id = ?")
+            params.append(plan_id)
+        if resolved is not None:
+            clauses.append("resolved = ?")
+            params.append(1 if resolved else 0)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetch_all(
+            f"SELECT payload FROM conflict_records {where} ORDER BY updated_at ASC, conflict_id ASC",
+            *params,
+        )
+        return [_from_dict("ConflictRecord", json.loads(row["payload"])) for row in rows]
+
+    def resolve_conflict(self, conflict_id: str, resolution: str) -> Any:
+        conflict = self.get_conflict(conflict_id)
+        if conflict is None:
+            raise KeyError(conflict_id)
+        data = _to_dict(conflict)
+        data["resolved"] = True
+        data["resolution"] = resolution
+        data["resolved_at"] = _now()
+        return self.record_conflict(_from_dict("ConflictRecord", data))
+
     def update_task_status(
         self,
         task_id: str,
@@ -294,6 +431,42 @@ class SQLiteTaskLedger:
                 """
             )
             conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS plans (
+                    plan_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS handoff_results (
+                    task_id TEXT PRIMARY KEY,
+                    plan_id TEXT,
+                    agent_id TEXT NOT NULL,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS conflict_records (
+                    conflict_id TEXT PRIMARY KEY,
+                    plan_id TEXT,
+                    task_id TEXT,
+                    source TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    resolved INTEGER NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_agent_discovery ON agent_cards(status, project_context, load)"
             )
             conn.execute(
@@ -304,6 +477,15 @@ class SQLiteTaskLedger:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_agent_outcomes ON agent_outcomes(agent_id, capability, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_plans_status ON plans(status, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_handoff_plan ON handoff_results(plan_id, updated_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_conflicts_plan ON conflict_records(plan_id, resolved, updated_at)"
             )
 
     def record_quality_result(self, task_id: str, result: dict[str, Any]) -> None:

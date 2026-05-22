@@ -113,3 +113,43 @@ def test_readme_documents_install_verification_and_build_commands():
     assert "mac-agent[http]" in readme
     assert "python examples/local_handoff.py" in readme
     assert "python examples/local_runner.py" in readme
+    assert "python examples/collaboration_plan.py" in readme
+
+
+def test_readme_collaboration_quick_start_commands_are_valid(tmp_path):
+    from mac.cli import main
+
+    db_path = tmp_path / "mac.db"
+    commands = [
+        ["plan", "create", "--db", str(db_path), "--plan-id", "plan-1", "--goal", "Ship login flow", "--created-by", "planner"],
+        ["plan", "activate", "--db", str(db_path), "--plan-id", "plan-1"],
+        ["register", "--db", str(db_path), "--agent-id", "coder", "--name", "Coder", "--capability", "write_code", "--allowed-path", "src/**"],
+        ["register", "--db", str(db_path), "--agent-id", "tester", "--name", "Tester", "--capability", "write_test", "--allowed-path", "tests/**"],
+        ["submit", "--db", str(db_path), "--task-id", "code-login", "--source-agent-id", "planner", "--type", "write_code", "--summary", "Implement login", "--plan-id", "plan-1"],
+        [
+            "submit",
+            "--db",
+            str(db_path),
+            "--task-id",
+            "test-login",
+            "--source-agent-id",
+            "planner",
+            "--type",
+            "write_test",
+            "--summary",
+            "Test login",
+            "--plan-id",
+            "plan-1",
+            "--depends-on",
+            "code-login",
+            "--target-module",
+            "src/login.py",
+            "--coverage-goal",
+            "80",
+        ],
+        ["ready-tasks", "--db", str(db_path), "--capability", "write_code"],
+        ["worker-packet", "--db", str(db_path), "--task-id", "code-login", "--agent-id", "coder"],
+    ]
+
+    for command in commands:
+        assert main(command) == 0
