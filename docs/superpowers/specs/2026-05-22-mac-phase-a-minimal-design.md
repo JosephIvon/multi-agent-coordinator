@@ -2,8 +2,21 @@
 
 > 版本：1.0
 > 日期：2026-05-22
-> 状态：待批准
+> 状态：批准实施（按 Implementation Amendments 收紧）
 > 原则：最小通用化，不绑定项目特定假设，可扩展而非预设
+
+---
+
+## 0. Implementation Amendments
+
+本节优先级高于下文原始草案，用于消除第一版落地风险：
+
+1. 依赖解锁只接受 `completed` / `cancelled`。`accepted` 仅表示任务被认领，不能解锁下游任务。
+2. `HandoffResult` 不嵌入 `TaskTransfer` 主记录，使用独立存储表和 `get_handoff_result()` 读取。
+3. `HandoffResult.risks` 使用 `list[str]`，便于结构化交接和审查。
+4. `PathRule` 默认 allow-all，所有路径限制都由调用方配置，MAC 不硬编码项目路径。
+5. Batch 1 不改变 `complete_task()` 行为；review lifecycle 放到 Batch 2，由 `CoordinationPolicy.require_review` 控制。
+6. `parallel_groups`、archive 状态、blocker 恢复语义、自动调度器全部延期。
 
 ---
 
@@ -78,7 +91,7 @@ class HandoffResult(BaseModel):
     verification: list[VerificationEntry] = Field(default_factory=list)
     changed_files: list[str] = Field(default_factory=list)
     docs_touched: list[str] = Field(default_factory=list)
-    risks: str = ""  # simple string, not list
+    risks: list[str] = Field(default_factory=list)
     boundary_review: Literal["pass", "block", "not_required"] = "not_required"
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -138,13 +151,12 @@ class TaskTransfer(BaseModel):
 
     # Review lifecycle (only used when policy enables it)
     review_ready_at: str | None = None
-    review_decision: Literal["accepted", "rejected"] | None = None
+    review_decision: Literal["approved", "rejected"] | None = None
     review_decided_by: str | None = None
     review_decided_at: str | None = None
     review_reject_reason: str | None = None
 
-    # Handoff
-    handoff_result: HandoffResult | None = None
+    # Handoff is stored separately and read via get_handoff_result(task_id).
 ```
 
 ---
@@ -265,8 +277,8 @@ class Registry:
     ) -> list[TaskTransfer]:
         """
         Returns tasks that are:
-        - status = 'proposed' or 'queued'
-        - all depends_on tasks are completed/accepted/cancelled
+        - status = 'proposed'
+        - all depends_on tasks are completed/cancelled
         - agent matches capability (if specified)
         - ordered by priority
         """
@@ -288,11 +300,7 @@ class Registry:
     def reject_review(self, task_id: str, reviewer_id: str, reason: str) -> TaskTransfer:
         """Reject. Reason is recorded as a conflict."""
 
-    def complete_task(self, task_id: str, agent_id: str) -> TaskTransfer:
-        """
-        If require_review=False: directly complete.
-        If require_review=True: move to review_ready instead.
-        """
+    # Batch 1 does not change complete_task(); review-aware completion is Batch 2.
 ```
 
 ### 5.4 Conflict

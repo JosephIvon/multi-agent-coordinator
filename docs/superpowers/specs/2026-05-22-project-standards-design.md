@@ -201,8 +201,8 @@ The codebase does not exhibit AI-generated code signatures:
 
 ```
 src/mac/
-├── __init__.py          # __version__ = "0.1.4"
-├── cli.py               # Entry point, 20 subcommands
+├── __init__.py          # __version__ = "0.2.0"
+├── cli.py               # Entry point, lifecycle and collaboration subcommands
 ├── events.py            # TaskEventBus
 ├── protocol/
 │   ├── __init__.py

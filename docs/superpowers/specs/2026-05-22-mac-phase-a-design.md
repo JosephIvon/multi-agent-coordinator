@@ -1,4 +1,9 @@
-# MAC Phase A — Plan + Collaboration Layer
+# MAC Phase A – Plan + Collaboration Layer
+
+> Note: this broad design was superseded for implementation by
+> `2026-05-22-mac-phase-a-minimal-design.md` plus the amendments in that file.
+> In particular, `accepted` does not unlock dependencies in the implemented
+> Phase A behavior.
 
 > 版本：1.0
 > 日期：2026-05-22
@@ -292,7 +297,7 @@ draft → active → completed / cancelled
 def list_ready_tasks(self, agent_id: str | None = None) -> list[TaskTransfer]:
     # 1. 找出所有 queued 任务
     # 2. 对每个任务计算 blocked_by（基于 depends_on）
-    # 3. 检查 blocked_by 是否全部 resolved（completed/accepted/cancelled）
+    # 3. 检查 blocked_by 是否全部 resolved（completed/cancelled）
     # 4. 如果 agent_id 指定，过滤 capability 匹配
     # 5. 按 priority 排序返回
 ```
