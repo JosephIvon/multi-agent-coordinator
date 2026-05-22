@@ -38,6 +38,7 @@ htmlcov/
 
 # MAC specific (runtime)
 mac.db
+.learnings/
 
 # Distribution / packaging
 dist/
