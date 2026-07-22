@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
@@ -105,6 +106,58 @@ class CoordinationPolicy(BaseModel):
     require_path_check: bool = False
     path_rule: PathRule = Field(default_factory=PathRule)
     max_retry_count: int = Field(default=3, ge=0)
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> CoordinationPolicy:
+        """Build a policy from environment variables.
+
+        Recognised variables (all optional):
+
+        - ``MAC_REQUIRE_REVIEW`` / ``MAC_REQUIRE_PATH_CHECK`` — truthy values
+          (``1``, ``true``, ``yes``, ``on``) enable the corresponding feature.
+        - ``MAC_MAX_RETRY_COUNT`` — non-negative integer override for retry cap.
+        - ``MAC_PATH_RULES`` — two halves separated by ``|`` (allowed|forbidden),
+          each half a comma-separated glob list. Whitespace around segments
+          is stripped; empty halves default to their Pydantic defaults.
+
+        An explicit ``env`` mapping is useful for tests; otherwise the
+        process environment is consulted.
+        """
+        source = os.environ if env is None else env
+
+        def _truthy(name: str) -> bool:
+            return source.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+        def _int(name: str, default: int) -> int:
+            raw = source.get(name)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                value = int(raw)
+            except ValueError as exc:
+                raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+            if value < 0:
+                raise ValueError(f"{name} must be >= 0, got {value}")
+            return value
+
+        path_rule = PathRule()
+        raw_rules = source.get("MAC_PATH_RULES")
+        if raw_rules is not None and raw_rules.strip():
+            allowed_raw, _, forbidden_raw = raw_rules.partition("|")
+            allowed_patterns = [item.strip() for item in allowed_raw.split(",") if item.strip()]
+            forbidden_patterns = [item.strip() for item in forbidden_raw.split(",") if item.strip()]
+            path_rule = PathRule(
+                allow_all=not allowed_patterns and not forbidden_patterns,
+                allowed_patterns=allowed_patterns,
+                forbidden_patterns=forbidden_patterns,
+            )
+
+        return cls(
+            require_review=_truthy("MAC_REQUIRE_REVIEW"),
+            require_path_check=_truthy("MAC_REQUIRE_PATH_CHECK"),
+            max_retry_count=_int("MAC_MAX_RETRY_COUNT", cls.model_fields["max_retry_count"].default),
+            path_rule=path_rule,
+        )
 
 
 class ContextBundle(BaseModel):

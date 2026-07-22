@@ -11,6 +11,7 @@ from mac.events import TaskEvent, TaskEventBus
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
     ConflictRecord,
+    CoordinationPolicy,
     HandoffResult,
     PathRule,
     Plan,
@@ -26,9 +27,18 @@ from mac.testing.contracts import TestContract
 
 
 class Registry:
-    def __init__(self, ledger: SQLiteTaskLedger, *, event_bus: TaskEventBus | None = None) -> None:
+    def __init__(
+        self,
+        ledger: SQLiteTaskLedger,
+        *,
+        event_bus: TaskEventBus | None = None,
+        policy: CoordinationPolicy | None = None,
+    ) -> None:
         self.ledger = ledger
         self.event_bus = event_bus
+        # Default to environment-driven policy so existing call sites
+        # pick up MAC_REQUIRE_REVIEW / MAC_PATH_RULES without code changes.
+        self.policy: CoordinationPolicy = policy or CoordinationPolicy.from_env()
 
     def register_agent(self, agent: Any) -> None:
         self.ledger.save_agent_card(agent)
@@ -276,6 +286,11 @@ class Registry:
 
     def complete_task(self, task_id: str, agent_id: str) -> TaskTransfer:
         task = self._get_task(task_id)
+        if self.policy.require_review and task.status == "running":
+            raise StateConflictError(
+                f"Task {task_id!r} requires review (require_review=True). "
+                "Use mark_review_ready() instead of complete_task()."
+            )
         allowed, reason = evaluate_quality_gate(
             task.test_contract,
             _current_attempt_quality_results(task, self.ledger.get_quality_results(task_id)),
@@ -283,6 +298,77 @@ class Registry:
         if not allowed:
             raise QualityGateError(reason or "quality_gate_failed")
         return self._transition(task_id, "completed", expected_status="running", agent_id=agent_id, action="complete_task")
+
+    def mark_review_ready(
+        self,
+        task_id: str,
+        agent_id: str,
+        handoff: HandoffResult | None = None,
+    ) -> TaskTransfer:
+        """Move a running task to ``review_ready`` and optionally save handoff.
+
+        Only valid when ``CoordinationPolicy.require_review=True``.
+        When ``require_review=False``, use ``complete_task()`` directly.
+        """
+        if not self.policy.require_review:
+            raise StateConflictError(
+                f"Task {task_id!r} cannot enter review_ready: "
+                "require_review is False. Use complete_task() instead."
+            )
+        task = self._get_task(task_id)
+        if task.status != "running":
+            raise StateConflictError(
+                f"Task {task_id!r} status is {task.status!r}, expected 'running'."
+            )
+        if handoff is not None:
+            self.save_handoff_result(handoff)
+        return self._transition(
+            task_id, "review_ready", expected_status="running",
+            agent_id=agent_id, action="mark_review_ready",
+        )
+
+    def accept_review(self, task_id: str, reviewer_id: str) -> TaskTransfer:
+        """Accept a ``review_ready`` task, transitioning to ``completed``."""
+        task = self._get_task(task_id)
+        if task.status != "review_ready":
+            raise StateConflictError(
+                f"Task {task_id!r} status is {task.status!r}, expected 'review_ready'."
+            )
+        return self._transition(
+            task_id, "completed", expected_status="review_ready",
+            agent_id=reviewer_id, action="accept_review",
+        )
+
+    def reject_review(
+        self,
+        task_id: str,
+        reviewer_id: str,
+        reason: str = "",
+    ) -> TaskTransfer:
+        """Reject a ``review_ready`` task, transitioning to ``rejected``.
+
+        The rejection reason is automatically recorded as a conflict.
+        """
+        task = self._get_task(task_id)
+        if task.status != "review_ready":
+            raise StateConflictError(
+                f"Task {task_id!r} status is {task.status!r}, expected 'review_ready'."
+            )
+        self.record_conflict(
+            ConflictRecord(
+                plan_id=task.plan_id,
+                task_id=task_id,
+                source="reject_review",
+                severity="blocking",
+                description=reason or f"Task {task_id!r} rejected by {reviewer_id}",
+                involved_agents=[reviewer_id],
+            )
+        )
+        return self._transition(
+            task_id, "rejected", expected_status="review_ready",
+            agent_id=reviewer_id, action="reject_review",
+            message=reason,
+        )
 
     def create_plan(
         self,
@@ -792,6 +878,9 @@ def _event_type_for_action(action: str) -> str:
         "start_task": "task_started",
         "reject_handoff": "task_rejected",
         "complete_task": "task_completed",
+        "mark_review_ready": "task_review_ready",
+        "accept_review": "task_review_accepted",
+        "reject_review": "task_review_rejected",
     }.get(action, action)
 
 
@@ -862,6 +951,8 @@ def _readiness_decision(
             return "complete_task", None
         reason = quality_preview.reason if quality_preview is not None else "quality_gate_unavailable"
         return "submit_quality_result", f"quality_gate_failed:{reason or 'quality_gate_failed'}"
+    if task.status == "review_ready":
+        return "accept_or_reject_review", None
     if task.status == "completed":
         return "none", "task_completed"
     if task.status == "failed":

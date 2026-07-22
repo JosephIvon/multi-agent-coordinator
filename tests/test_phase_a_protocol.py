@@ -2,6 +2,7 @@ from mac.protocol.messages import (
     AgentCapability,
     AgentCard,
     ConflictRecord,
+    CoordinationPolicy,
     HandoffResult,
     PathRule,
     Plan,
@@ -63,3 +64,58 @@ def test_task_transfer_carries_plan_and_dependencies_without_embedded_handoff():
     assert task.plan_id == "plan-1"
     assert task.depends_on == ["task-0"]
     assert "handoff_result" not in TaskTransfer.model_fields
+
+
+# ---------------------------------------------------------------------------
+# CoordinationPolicy.from_env
+# ---------------------------------------------------------------------------
+
+
+def test_coordination_policy_from_env_returns_defaults_when_no_variables_set():
+    policy = CoordinationPolicy.from_env(env={})
+
+    assert policy.require_review is False
+    assert policy.require_path_check is False
+    assert policy.max_retry_count == 3
+    assert policy.path_rule.allow_all is True
+    assert policy.path_rule.allowed_patterns == []
+    assert policy.path_rule.forbidden_patterns == []
+
+
+def test_coordination_policy_from_env_reads_truthy_flags_case_insensitively():
+    policy = CoordinationPolicy.from_env(
+        env={
+            "MAC_REQUIRE_REVIEW": "TRUE",
+            "MAC_REQUIRE_PATH_CHECK": "on",
+            "MAC_MAX_RETRY_COUNT": "7",
+        }
+    )
+
+    assert policy.require_review is True
+    assert policy.require_path_check is True
+    assert policy.max_retry_count == 7
+
+
+def test_coordination_policy_from_env_parses_path_rules_allowed_and_forbidden():
+    policy = CoordinationPolicy.from_env(
+        env={"MAC_PATH_RULES": "backend/**, tests/** | db/** , fixtures/gold/**"}
+    )
+
+    assert policy.path_rule.allow_all is False
+    assert policy.path_rule.allowed_patterns == ["backend/**", "tests/**"]
+    assert policy.path_rule.forbidden_patterns == ["db/**", "fixtures/gold/**"]
+
+
+def test_coordination_policy_from_env_path_rules_only_allowed_side():
+    policy = CoordinationPolicy.from_env(env={"MAC_PATH_RULES": "src/**|"})
+
+    assert policy.path_rule.allow_all is False
+    assert policy.path_rule.allowed_patterns == ["src/**"]
+    assert policy.path_rule.forbidden_patterns == []
+
+
+def test_coordination_policy_from_env_rejects_non_integer_retry_count():
+    import pytest
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        CoordinationPolicy.from_env(env={"MAC_MAX_RETRY_COUNT": "lots"})
