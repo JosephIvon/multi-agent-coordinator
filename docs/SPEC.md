@@ -1,7 +1,7 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.0
-> Date: 2026-05-22
+> Version: 2.1
+> Date: 2026-07-22
 > Status: implemented for local Phase A collaboration
 
 ---
@@ -147,6 +147,12 @@ Important: `accepted` does not unlock a dependency. It only means an agent claim
 
 `claim_next_task()` skips dependency-blocked tasks.
 
+### Cycle Detection
+
+`submit_task()` rejects tasks whose `depends_on` creates a cycle. The check walks the existing dependency graph from each declared dependency; if any path leads back to the new task's `task_id`, `StateConflictError(circular_dependency)` is raised and the row is never persisted.
+
+Self-loops (`task_id` in its own `depends_on`) are also rejected.
+
 ---
 
 ## 5. Path Guardrails
@@ -178,6 +184,8 @@ Main operations:
 - Handoff: `save_handoff_result()`, `get_handoff_result()`
 - Conflict: `record_conflict()`, `list_conflicts()`, `resolve_conflict()`
 - Packet: `prepare_worker_packet()`, `prepare_review_packet()`
+- Audit: `get_audit_trail(trace_id)`
+- Metrics: `get_metrics()`
 
 CLI and HTTP adapters are thin wrappers around this API.
 
@@ -191,7 +199,7 @@ Tables:
 |-------|---------|
 | `agent_cards` | Agent card JSON plus indexed status/load/capability metadata |
 | `task_transfers` | Task JSON plus indexed status/project context |
-| `audit_entries` | Append-only task audit events |
+| `audit_entries` | Append-only task audit events (indexed by `trace_id` + `created_at`) |
 | `quality_results` | Quality evidence by task and retry attempt |
 | `agent_outcomes` | Observed capability outcomes |
 | `plans` | Plan JSON and plan status |
@@ -200,9 +208,76 @@ Tables:
 
 SQLite WAL mode is enabled. Phase A is intended for a local single-workspace setup.
 
+The `audit_entries` table has a `trace_id` column (default empty) with index `idx_audit_trace(trace_id, created_at)`. Pre-existing databases are auto-migrated: the column is added and `trace_id` is backfilled from the payload JSON for rows written before the column existed.
+
 ---
 
-## 8. Deferred Work
+## 8. Trace Metrics
+
+Six read-only aggregate indicators derived from existing SQLite tables (no new schema):
+
+| Indicator | Description |
+|-----------|-------------|
+| `task_cycle_time_seconds` | Average time from first `submit_task` audit to `task_transfers.updated_at` (status=completed) |
+| `handoff_success_rate` | `boundary_review == 'pass'` / total handoffs |
+| `quality_gate_pass_rate` | `status == 'passed'` / total quality results |
+| `retry_rate` | Tasks with `retry_count > 0` / total tasks |
+| `conflict_rate` | Conflict records / total tasks |
+| `active_agents` | Agent cards with `status == 'online'` |
+
+Python API: `compute_metrics(ledger) → dict`. HTTP: `GET /metrics`.
+
+Payload JSON is deserialized in Python and aggregated there (no `json_extract`, which requires SQLite 3.38+; this project supports Python 3.10+ whose stdlib ships SQLite 3.37).
+
+---
+
+## 9. MCP Server
+
+MAC exposes its coordination API as an MCP (Model Context Protocol) server for AI coding tools. The server uses `FastMCP` with stdio transport.
+
+### Error Signaling
+
+Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isError=True`:
+
+| Domain Exception | ToolError Prefix |
+|------------------|-----------------|
+| `KeyError` | `not_found` |
+| `ValidationError` | `validation_failed` |
+| `QualityGateError` | `quality_gate_failed` |
+| `StateConflictError` | `state_conflict` |
+| `None` result | `not_found` |
+
+LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
+
+### Tools (8)
+
+| Tool | Parameters | Returns | Side Effect |
+|------|-----------|---------|-------------|
+| `mac_submit_task` | `task: dict` (TaskTransfer) | JSON TaskTransfer | write |
+| `mac_claim_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | JSON TaskTransfer | write |
+| `mac_record_quality_and_complete` | `task_id`, `agent_id`, `result: dict` | JSON `{status, task_id, reason}` | write |
+| `mac_fail_task` | `task_id`, `agent_id`, `error_code`, `message?` | JSON TaskTransfer | write |
+| `mac_save_handoff` | `task_id`, `agent_id`, `changed_files?`, `verification_passed?`, `boundary_review?`, `risks?` | JSON HandoffResult | write |
+| `mac_list_ready_tasks` | `capability?`, `project_context?` | JSON array of TaskTransfer | read-only |
+| `mac_review_packet` | `task_id` | Markdown string | read-only |
+| `mac_worker_packet` | `task_id`, `agent_id?` | Markdown string | read-only |
+
+`mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
+
+`mac_record_quality_and_complete` is atomic: `submit_quality_result` → `evaluate_quality_gate` → `complete_task` (only if gate passes). Returns `status='completed'` or `status='running'` with reason.
+
+`mac_worker_packet` includes the agent's `allowed_paths` and `forbidden_paths` when `agent_id` is provided.
+
+### Resources (2)
+
+| URI | Description |
+|-----|-------------|
+| `mac://capabilities` | Agents grouped by capability name |
+| `mac://health` | Health summary: `last_updated`, `open_tasks`, `inflight_agents` |
+
+---
+
+## 10. Deferred Work
 
 - Review lifecycle states (`review_ready`, `accept_review`, `reject_review`) behind a policy switch.
 - Leases, daemon workers, and automatic external-agent execution.

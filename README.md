@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.2.0 | **License:** MIT
+**Version:** 0.3.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -191,7 +191,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (7)
+### Available Tools (8)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -202,6 +202,7 @@ claude mcp add mac -- mac-mcp-server
 | `mac_save_handoff` | Save structured handoff result | write |
 | `mac_list_ready_tasks` | List claimable tasks | read-only |
 | `mac_review_packet` | Generate reviewer prompt (Markdown) | read-only |
+| `mac_worker_packet` | Generate worker prompt (Markdown) | read-only |
 
 ### Available Resources (2)
 
@@ -209,6 +210,32 @@ claude mcp add mac -- mac-mcp-server
 |-----|-------------|
 | `mac://capabilities` | Agent capability registry |
 | `mac://health` | Health summary (open tasks, inflight agents) |
+
+---
+
+## Observability
+
+MAC exposes 6 aggregate metrics via the Python API and HTTP endpoint:
+
+| Metric | Description |
+|--------|-------------|
+| `task_cycle_time_seconds` | Average time from submit to completed |
+| `handoff_success_rate` | Fraction of handoffs with `boundary_review == 'pass'` |
+| `quality_gate_pass_rate` | Fraction of quality results with `status == 'passed'` |
+| `retry_rate` | Fraction of tasks with `retry_count > 0` |
+| `conflict_rate` | Conflicts per task |
+| `active_agents` | Agents currently online |
+
+```python
+from mac.metrics import compute_metrics
+from mac.storage.sqlite import SQLiteTaskLedger
+
+metrics = compute_metrics(SQLiteTaskLedger("mac.db"))
+print(metrics["quality_gate_pass_rate"])
+# 0.8571
+```
+
+HTTP: `GET /metrics` returns the same dict as JSON.
 
 ---
 
@@ -223,6 +250,7 @@ claude mcp add mac -- mac-mcp-server
 - Record and resolve conflicts.
 - Generate worker and review Markdown packets for human-mediated agent handoff.
 - Enforce risk-based quality evidence before completing tasks with a `TestContract`.
+- Expose 6 aggregate metrics for observability (cycle time, handoff/quality pass rates, retry/conflict rates, active agents).
 
 ## What It Cannot Do Yet
 
@@ -246,8 +274,10 @@ src/mac/
   runner/            Local one-shot runner adapter and templates
   testing/           TestContract and planner
   transport/         FastAPI adapter
+  metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
+  mcp_server.py      MCP Server (8 tools + 2 resources)
 ```
 
 ---
