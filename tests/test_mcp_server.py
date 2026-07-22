@@ -580,3 +580,25 @@ class TestStdioE2E:
                 )
                 assert err_result.isError is True
                 assert "not_found" in err_result.content[0].text
+
+                # 6. Submit a task and pull its worker packet; verifies mac_worker_packet
+                #    is callable via stdio (symmetric with mac_review_packet coverage).
+                submit_result = await session.call_tool(
+                    "mac_submit_task",
+                    arguments={
+                        "task_id": "stdio-task-1",
+                        "source_agent_id": "planner",
+                        "payload": {"type": "write_code", "summary": "Round-trip packet"},
+                    },
+                )
+                assert submit_result.isError is False
+
+                packet_result = await session.call_tool(
+                    "mac_worker_packet",
+                    arguments={"task_id": "stdio-task-1"},
+                )
+                assert packet_result.isError is False
+                packet_text = packet_result.content[0].text
+                assert "Worker Task: stdio-task-1" in packet_text
+                assert "## Handoff Format" in packet_text
+                assert "## Acceptance Criteria" in packet_text
