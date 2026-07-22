@@ -2,12 +2,8 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from mac.protocol.messages import AgentCapability, AgentCard, AuditEntry, TaskTransfer
 from mac.storage import SQLiteTaskLedger, StatusConflict
-
-try:
-    from mac.protocol.messages import AgentCapability, AgentCard, AuditEntry, TaskTransfer
-except ModuleNotFoundError:
-    from mac.storage.models import AgentCapability, AgentCard, AuditEntry, TaskTransfer
 
 
 def test_sqlite_ledger_persists_agent_task_and_audit_entries(tmp_path):

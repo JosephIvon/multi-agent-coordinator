@@ -5,10 +5,6 @@ TASK_STATUSES = {
     "completed",
     "failed",
     "rejected",
-    "blocked",
-    "needs_input",
-    "needs_review",
-    "verifying",
     "cancelled",
     "superseded",
 }

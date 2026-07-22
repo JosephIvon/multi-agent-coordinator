@@ -78,6 +78,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ready_tasks.add_argument("--capability")
     ready_tasks.add_argument("--project-context")
 
+    metrics = subcommands.add_parser("metrics", help="Show collaboration trace metrics")
+    metrics.add_argument("--db", default="mac.db")
+    metrics.add_argument("--json", action="store_true", help="Emit metrics as JSON")
+
     handoff = subcommands.add_parser("handoff", help="Save or print a structured task handoff")
     handoff.add_argument("--db", default="mac.db")
     handoff.add_argument("--task-id", required=True)
@@ -347,6 +351,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_context=args.project_context,
         )
         _print_json([task.model_dump(mode="json") for task in tasks])
+        return 0
+
+    if args.command == "metrics":
+        from mac.metrics import compute_metrics, format_table
+        from mac.storage.sqlite import SQLiteStorage
+
+        computed = compute_metrics(SQLiteStorage(Path(args.db)))
+        if args.json:
+            print(json.dumps(computed, ensure_ascii=False, indent=2))
+        else:
+            print(format_table(computed))
         return 0
 
     if args.command == "handoff":

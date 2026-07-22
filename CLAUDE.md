@@ -9,10 +9,10 @@
 
 - **定位**:轻量多智能体**协作账本**,不是执行引擎
 - **版本**:0.2.0 Alpha | **Python**:≥ 3.10 | **License**:MIT
-- **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(仅 http 扩展)
+- **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
 - **状态机**:`proposed → accepted → running → completed`(另含 `rejected` / `failed` / `cancelled` / `superseded`)
-- **测试**:pytest ~136 用例,跑 `python -m pytest tests/ -q`
+- **测试**:pytest ~155 用例,跑 `python -m pytest tests/ -q`
 
 ---
 
@@ -26,6 +26,8 @@ src/mac/
 ├── quality/gate.py         # 质量门
 ├── runner/                 # 本地 adapter(命令/Pytest 模板)
 ├── transport/http_ws.py    # FastAPI app(仅 http extra)
+├── mcp_server.py           # MCP Server(7 tools + 2 resources,仅 mcp extra)
+├── metrics.py              # 可观测性聚合
 ├── events.py               # TaskEventBus
 └── cli.py                  # CLI 子命令
 ```
@@ -109,3 +111,34 @@ src/mac/
 - **不做**:gRPC / Redis / Postgres / ORM 层 / 执行引擎 / Docker / gitleaks / CI(全部 deferred,见 SPEC §8)
 - **AI 工具栈**:Claude Code / Qoder / Trae / Cursor 都能接 MCP server;MAC 提供 CLI 协议,不绑死工具链
 - **借鉴**:本文件设计参考过同类多智能体项目的 governance 经验(2026-07-22 调研),采纳最小子集,其余过设计内容未采用
+
+---
+
+## 9. MCP Server 指引
+
+AI 编码工具通过 MCP 接入 MAC,7 tools + 2 resources:
+
+| Tool | 作用 | 副作用 |
+|------|------|--------|
+| `mac_submit_task` | 提交任务(完整 TaskTransfer dict) | 写 |
+| `mac_claim_task` | 认领 + 启动任务(原子操作) | 写 |
+| `mac_record_quality_and_complete` | 提交质量证据 + 闸门通过则自动 complete | 写 |
+| `mac_fail_task` | 标记任务失败 | 写 |
+| `mac_save_handoff` | 保存结构化交接 | 写 |
+| `mac_list_ready_tasks` | 列出可认领任务 | 只读 |
+| `mac_review_packet` | 生成 reviewer prompt(Markdown) | 只读 |
+
+Resources: `mac://capabilities`(能力清单), `mac://health`(健康状态)。
+
+启动方式:
+
+```bash
+# Console script
+mac-mcp-server
+
+# 或 module 方式
+python -m mac.mcp_server
+
+# 或 Claude Code 配置
+# claude mcp add mac -- mac-mcp-server
+```

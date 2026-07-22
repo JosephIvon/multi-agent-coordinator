@@ -1,10 +1,6 @@
+from mac.protocol.messages import AgentCapability, AgentCard
 from mac.registry import Registry
 from mac.storage import SQLiteTaskLedger
-
-try:
-    from mac.protocol.messages import AgentCapability, AgentCard
-except ModuleNotFoundError:
-    from mac.storage.models import AgentCapability, AgentCard
 
 
 def test_registry_discovers_agents_by_capability_status_load_and_project_context(tmp_path):
