@@ -105,6 +105,44 @@ def test_list_ready_tasks_is_read_only(tmp_path):
     assert after == before
 
 
+def test_submit_task_rejects_self_loop(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+
+    with pytest.raises(StateConflictError, match="circular_dependency"):
+        registry.submit_task(_task("task-1", depends_on=["task-1"]))
+
+    assert registry.get_task("task-1") is None
+
+
+def test_submit_task_rejects_indirect_cycle(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("task-a", depends_on=["task-b"]))
+    assert registry.get_task("task-a").depends_on == ["task-b"]
+
+    with pytest.raises(StateConflictError, match="circular_dependency"):
+        registry.submit_task(_task("task-b", depends_on=["task-a"]))
+
+    assert registry.get_task("task-b") is None
+
+
+def test_submit_task_allows_diamond_dependency_without_cycle(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("task-b"))
+    registry.submit_task(_task("task-c"))
+    registry.submit_task(_task("task-a", depends_on=["task-b", "task-c"]))
+
+    ready = [task.task_id for task in registry.list_ready_tasks(capability="write_code")]
+    assert set(ready) == {"task-b", "task-c"}
+
+
+def test_submit_task_tolerates_missing_dependency_forward_reference(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+
+    registry.submit_task(_task("task-a", depends_on=["future-task"]))
+
+    assert registry.get_task("task-a").depends_on == ["future-task"]
+
+
 def test_handoff_path_guardrail_blocks_and_records_conflict(tmp_path):
     registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
     registry.register(

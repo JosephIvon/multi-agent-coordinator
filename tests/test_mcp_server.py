@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -330,25 +332,76 @@ class TestHealthResource:
 
 
 # ---------------------------------------------------------------------------
-# Stdio smoke test (1 test — verifies real MCP transport)
+# Stdio E2E test (verifies real MCP JSON-RPC transport over subprocess)
 # ---------------------------------------------------------------------------
 
 
-class TestStdioSmoke:
-    def test_server_starts_and_lists_tools(self) -> None:
-        """Verify the MCP server can list its tools via stdio transport."""
-        tools = mcp._tool_manager._tools
-        resource_uris = mcp._resource_manager._resources
-        assert set(tools.keys()) == {
-            "mac_claim_task",
-            "mac_fail_task",
-            "mac_list_ready_tasks",
-            "mac_record_quality_and_complete",
-            "mac_review_packet",
-            "mac_save_handoff",
-            "mac_submit_task",
-        }
-        assert set(resource_uris.keys()) == {
-            "mac://capabilities",
-            "mac://health",
-        }
+class TestStdioE2E:
+    """Launch the MCP server as a real subprocess and exercise the JSON-RPC
+    protocol via mcp.client.stdio + ClientSession.
+
+    NOTE: Skipped on Windows due to ProactorEventLoop subprocess pipe
+    limitations (see K-002). The in-process tests above cover all
+    functional paths; this test validates the stdio transport layer
+    on Linux/macOS only.
+    """
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Windows ProactorEventLoop does not support subprocess stdio pipes (K-002)",
+    )
+    def test_initialize_list_tools_and_call_tool(self, tmp_path: Path) -> None:
+        """Full round-trip: initialize → list_tools → call_tool over stdio."""
+        asyncio.run(self._run(tmp_path))
+
+    @staticmethod
+    async def _run(tmp_path: Path) -> None:
+        import os
+
+        from mcp.client.session import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "mac.mcp_server"],
+            env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+            cwd=str(tmp_path),  # mac.db will be created here
+        )
+
+        async with stdio_client(server_params) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                # 1. Initialize
+                result = await session.initialize()
+                assert result.serverInfo.name == "mac-coordinator"
+
+                # 2. List tools — expect 7
+                tools_result = await session.list_tools()
+                tool_names = {tool.name for tool in tools_result.tools}
+                assert tool_names == {
+                    "mac_claim_task",
+                    "mac_fail_task",
+                    "mac_list_ready_tasks",
+                    "mac_record_quality_and_complete",
+                    "mac_review_packet",
+                    "mac_save_handoff",
+                    "mac_submit_task",
+                }
+
+                # 3. List resources — expect 2
+                resources_result = await session.list_resources()
+                resource_uris = {r.uri for r in resources_result.resources}
+                assert resource_uris == {
+                    "mac://capabilities",
+                    "mac://health",
+                }
+
+                # 4. Call a read-only tool
+                ready_result = await session.call_tool(
+                    "mac_list_ready_tasks",
+                    arguments={"capability": "write_code"},
+                )
+                # Result is a list of TextContent; parse the first one
+                assert len(ready_result.content) >= 1
+                text = ready_result.content[0].text
+                parsed = json.loads(text)
+                assert parsed == []  # empty ledger → no ready tasks

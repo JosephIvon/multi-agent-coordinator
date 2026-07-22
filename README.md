@@ -150,6 +150,68 @@ Core endpoints:
 
 ---
 
+## MCP Server
+
+MAC exposes its coordination API as an MCP (Model Context Protocol) server, so AI coding tools like Claude Code, Cursor, and Windsurf can call MAC natively.
+
+### Setup
+
+```bash
+pip install "mac-agent[mcp]"
+```
+
+### Running
+
+```bash
+# Console script (stdio transport)
+mac-mcp-server
+
+# Or module form
+python -m mac.mcp_server
+```
+
+### Connecting AI Tools
+
+**Claude Code:**
+
+```bash
+claude mcp add mac -- mac-mcp-server
+```
+
+**Cursor / Windsurf** — add to `.cursor/mcp.json` or project settings:
+
+```json
+{
+  "mcpServers": {
+    "mac": {
+      "command": "mac-mcp-server",
+      "args": []
+    }
+  }
+}
+```
+
+### Available Tools (7)
+
+| Tool | Purpose | Side Effect |
+|------|---------|-------------|
+| `mac_submit_task` | Submit a task (full TaskTransfer dict) | write |
+| `mac_claim_task` | Claim + start a task (atomic) | write |
+| `mac_record_quality_and_complete` | Submit evidence + auto-complete on gate pass | write |
+| `mac_fail_task` | Mark task as failed | write |
+| `mac_save_handoff` | Save structured handoff result | write |
+| `mac_list_ready_tasks` | List claimable tasks | read-only |
+| `mac_review_packet` | Generate reviewer prompt (Markdown) | read-only |
+
+### Available Resources (2)
+
+| URI | Description |
+|-----|-------------|
+| `mac://capabilities` | Agent capability registry |
+| `mac://health` | Health summary (open tasks, inflight agents) |
+
+---
+
 ## What It Can Do
 
 - Coordinate local multi-agent task work through SQLite WAL.

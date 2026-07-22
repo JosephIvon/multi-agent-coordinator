@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mac": {
+      "command": "mac-mcp-server",
+      "args": [],
+      "env": {}
+    }
+  }
+}

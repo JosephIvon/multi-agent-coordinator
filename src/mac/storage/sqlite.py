@@ -361,12 +361,19 @@ class SQLiteTaskLedger:
     def _insert_audit(self, conn: sqlite3.Connection, data: dict[str, Any]) -> None:
         if not data.get("created_at"):
             data["created_at"] = _now()
+        trace_id = str(data.get("trace_id") or "")
         conn.execute(
             """
-            INSERT INTO audit_entries (entry_id, task_id, created_at, payload)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO audit_entries (entry_id, task_id, created_at, trace_id, payload)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (data["entry_id"], data["task_id"], data["created_at"], _json(data)),
+            (
+                data["entry_id"],
+                data["task_id"],
+                data["created_at"],
+                trace_id,
+                _json(data),
+            ),
         )
 
     def _initialize(self) -> None:
@@ -402,10 +409,39 @@ class SQLiteTaskLedger:
                     entry_id TEXT PRIMARY KEY,
                     task_id TEXT NOT NULL,
                     created_at TEXT NOT NULL,
+                    trace_id TEXT NOT NULL DEFAULT '',
                     payload TEXT NOT NULL
                 )
                 """
             )
+            # Migration: pre-existing databases lack the trace_id column.
+            existing_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(audit_entries)").fetchall()
+            }
+            if "trace_id" not in existing_columns:
+                conn.execute(
+                    "ALTER TABLE audit_entries ADD COLUMN trace_id TEXT NOT NULL DEFAULT ''"
+                )
+                # Backfill trace_id from payload JSON for rows written before the
+                # migration. Done in Python (json.loads) rather than SQL because
+                # stdlib sqlite3 on Python 3.10 ships SQLite 3.37, which lacks
+                # json_extract. Bound to O(n) rows once at startup; cost is
+                # negligible compared to the subsequent indexed lookup.
+                pending = conn.execute(
+                    "SELECT entry_id, payload FROM audit_entries WHERE trace_id = ''"
+                ).fetchall()
+                for row in pending:
+                    try:
+                        payload_obj = json.loads(row["payload"])
+                    except (TypeError, ValueError):
+                        continue
+                    recovered = str(payload_obj.get("trace_id") or "")
+                    if recovered:
+                        conn.execute(
+                            "UPDATE audit_entries SET trace_id = ? WHERE entry_id = ?",
+                            (recovered, row["entry_id"]),
+                        )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS quality_results (
@@ -473,6 +509,9 @@ class SQLiteTaskLedger:
                 "CREATE INDEX IF NOT EXISTS idx_audit_task ON audit_entries(task_id, created_at)"
             )
             conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_audit_trace ON audit_entries(trace_id, created_at)"
+            )
+            conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_quality_task ON quality_results(task_id, created_at)"
             )
             conn.execute(
@@ -509,9 +548,12 @@ class SQLiteTaskLedger:
         return [json.loads(row["payload"]) for row in rows]
 
     def get_audit_trail(self, trace_id: str) -> list[Any]:
-        rows = self._fetch_all("SELECT payload FROM audit_entries ORDER BY created_at ASC, entry_id ASC")
-        entries = [_from_dict("AuditEntry", json.loads(row["payload"])) for row in rows]
-        return [entry for entry in entries if getattr(entry, "trace_id", "") == trace_id]
+        rows = self._fetch_all(
+            "SELECT payload FROM audit_entries WHERE trace_id = ? "
+            "ORDER BY created_at ASC, entry_id ASC",
+            trace_id,
+        )
+        return [_from_dict("AuditEntry", json.loads(row["payload"])) for row in rows]
 
     def record_task_outcome(
         self,

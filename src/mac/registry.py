@@ -87,6 +87,7 @@ class Registry:
     def submit_task(self, task: TaskTransfer) -> TaskTransfer:
         if task.plan_id and self.ledger.get_plan(task.plan_id) is None:
             raise KeyError(task.plan_id)
+        self._assert_no_cycle(task)
         self.ledger.save_task_transfer(task)
         if task.plan_id:
             self._add_task_to_plan(task.plan_id, task.task_id)
@@ -609,6 +610,38 @@ class Registry:
             if dependency is None or dependency.status not in {"completed", "cancelled"}:
                 return False
         return True
+
+    def _assert_no_cycle(self, task: TaskTransfer) -> None:
+        """Reject submit_task when depends_on chains reach task.task_id.
+
+        Walks the existing dependency graph from each declared dependency. If any
+        path leads back to ``task.task_id`` (self-loop or indirect cycle),
+        raises ``StateConflictError`` so the row is never persisted.
+        """
+        if task.task_id in task.depends_on:
+            raise StateConflictError(
+                f"circular_dependency: task {task.task_id!r} lists itself in depends_on"
+            )
+
+        target = task.task_id
+        visited: set[str] = set()
+
+        def walk(node: str) -> bool:
+            if node == target:
+                return True
+            if node in visited:
+                return False
+            visited.add(node)
+            dependency = self.ledger.get_task_transfer(node)
+            if dependency is None:
+                return False
+            return any(walk(next_node) for next_node in dependency.depends_on)
+
+        for dep_id in task.depends_on:
+            if walk(dep_id):
+                raise StateConflictError(
+                    f"circular_dependency: dependency {dep_id!r} chain reaches {target!r}"
+                )
 
     def _dependency_lines(self, task: TaskTransfer) -> list[str]:
         lines = []
