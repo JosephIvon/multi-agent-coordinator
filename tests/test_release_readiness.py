@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-import tomllib
+try:
+    import tomllib  # Python 3.11+ stdlib
+except ImportError:  # pragma: no cover - exercised only on Python 3.10
+    import tomli as tomllib
+
 from pathlib import Path
 import subprocess
 import sys

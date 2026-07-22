@@ -1,258 +1,111 @@
-# MAC — AI Agent Guide
+# CLAUDE.md — MAC 开发指南
 
-**Version:** 0.2.0
-**Language:** English (technical authority)
-**Last updated:** 2026-05-22
-
----
-
-## Project Overview
-
-MAC is a lightweight coordination layer for AI coding agents — a task ledger, context broker, quality gate, and handoff protocol for multi-agent Python development.
-
-- **Version:** 0.2.0 (see `src/mac/__init__.py` and `pyproject.toml`)
-- **License:** MIT
-- **Python:** >=3.10
+> 单一规范文档。AI / 人类维护者都读它。
+> 本文件只写机器兜不住的协作协议,能在 ruff / mypy / pytest / compileall 里跑出来的约定不重复。
 
 ---
 
-## Architecture
+## 0. 项目速查
+
+- **定位**:轻量多智能体**协作账本**,不是执行引擎
+- **版本**:0.2.0 Alpha | **Python**:≥ 3.10 | **License**:MIT
+- **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(仅 http 扩展)
+- **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
+- **状态机**:`proposed → accepted → running → completed`(另含 `rejected` / `failed` / `cancelled` / `superseded`)
+- **测试**:pytest ~136 用例,跑 `python -m pytest tests/ -q`
+
+---
+
+## 1. 架构速查(指针化)
 
 ```
 src/mac/
-├── __init__.py          # __version__ = "0.2.0"
-├── cli.py               # Entry point: lifecycle + collaboration subcommands
-├── events.py            # TaskEventBus (sync + asyncio queue)
-├── protocol/
-│   ├── __init__.py
-│   ├── constants.py
-│   ├── errors.py        # MACError hierarchy (StateConflictError, QualityGateError, etc.)
-│   └── messages.py      # Pydantic models — AUTHORITATIVE (Plan, TaskTransfer, HandoffResult, ConflictRecord)
-├── quality/
-│   ├── __init__.py
-│   └── gate.py          # evaluate_quality_gate()
-├── registry.py          # Central coordinator — all business logic
-├── runner/
-│   ├── __init__.py
-│   ├── local.py         # LocalAgentRunner, TaskRunResult, command_task_handler
-│   └── templates.py     # LocalAgentTemplate, command_agent_template, pytest_agent_template
-├── storage/
-│   ├── __init__.py
-│   ├── models.py        # DEPRECATED dataclass models — do not use for new code
-│   └── sqlite.py        # SQLiteTaskLedger, StatusConflict (CAS error)
-├── testing/
-│   ├── __init__.py
-│   ├── contracts.py     # TestContract.for_risk(), RiskLevel
-│   └── planner.py       # plan_test_contract()
-└── transport/
-    ├── __init__.py
-    └── http_ws.py       # FastAPI app factory, create_app()
+├── protocol/messages.py   # 协议权威(Pydantic 模型)
+├── storage/sqlite.py       # SQLite WAL ledger
+├── registry.py             # 业务逻辑入口
+├── quality/gate.py         # 质量门
+├── runner/                 # 本地 adapter(命令/Pytest 模板)
+├── transport/http_ws.py    # FastAPI app(仅 http extra)
+├── events.py               # TaskEventBus
+└── cli.py                  # CLI 子命令
 ```
 
-**Key principle:** `protocol/messages.py` is the authoritative model layer. `storage/models.py` is deprecated.
+详细架构 / 端点契约见 [`docs/SPEC.md`](docs/SPEC.md)。要写新功能:**先打开 SPEC.md**。
 
 ---
 
-## Coding Conventions
+## 2. 编码约定(只列机器兜不住的)
 
-### Type Hints
-- **Full explicit** annotations on all public functions/methods
-- Python 3.10+ native union syntax: `str | None`, `int | None`, `list[str]`
-- **No** `Optional[X]` — use `X | None` instead
-- Return types required
-
-```python
-# Correct
-def get_agent(self, agent_id: str) -> AgentCard | None: ...
-
-# Incorrect
-def get_agent(self, agent_id: str): ...           # missing return type
-def get_agent(self, agent_id: str) -> Optional: ...  # bad style
-```
-
-### Error Handling
-- Custom exception hierarchy in `protocol/errors.py`
-- Base: `MACError(RuntimeError)` → `StateConflictError`, `QualityGateError`, `TaskExpiredError`, `MaxHopsExceededError`
-- `StatusConflict` (in `storage/sqlite.py`) is the SQLite CAS error — different from domain errors
-- No bare `except:` — catch specific types
-- No silent `pass` in exception handlers
-
-```python
-# Correct
-except StatusConflict as exc:
-    raise StateConflictError(str(exc)) from exc
-
-# Incorrect
-except Exception:
-    pass
-```
-
-### Docstrings
-- **Required** on all public classes and functions in `src/mac/`
-- Google style (`:param:`, `:returns:`, `:raises:`)
-- Private methods (`_method`): optional, simple one-line summary fine
-
-```python
-def accept_handoff(self, task_id: str, agent_id: str) -> TaskTransfer:
-    """Accept a proposed task handoff.
-
-    :param task_id: ID of the task to accept
-    :param agent_id: ID of the agent accepting the handoff
-    :returns: Updated TaskTransfer with status='accepted'
-    :raises StateConflictError: if task is not in 'proposed' status
-    """
-```
-
-### Module Structure
-- `from __future__ import annotations` at top of every file
-- Maximum **300 lines** per `.py` file; split when exceeded
-- Imports ordered: stdlib → third-party → local (`mac.*`)
-- Private helpers (`_func`) placed after public API
-- No `__all__` required
-
-### Naming
-
-| Element | Convention | Example |
-|---------|------------|---------|
-| Modules | lowercase, no separator | `sqlite.py`, `gate.py` |
-| Packages | lowercase, single word | `protocol/`, `runner/` |
-| Classes | PascalCase | `TaskTransfer`, `AgentCard` |
-| Functions/methods | snake_case | `claim_next_task`, `_audit` |
-| Constants | UPPER_SNAKE | `_HIGH_RISK_SIGNALS` |
-| Test functions | `test_<what>` | `test_registry_discovers_agents` |
-| Test files | `test_<subject>.py` | `test_registry.py` |
-
-### Prohibited Patterns
-- `TODO`, `FIXME`, `COMPLETE ME` — finish work before committing
-- `[...]` placeholder — implement or remove
-- `Optional[X]` without `None` default — use `X | None`
-- Bare `except:` — catch specific types
-- `"""<missing>"""` docstring template — complete or remove
-- Magic numbers — use named constants
+- **类型注解**:公共 API 必须显式返回类型;`X | None` 不用 `Optional[X]`(ruff UP007 已开启)
+- **错误**:业务异常抛 `MACError` 子类(见 [`protocol/errors.py`](src/mac/protocol/errors.py));`StatusConflict` 是 SQLite CAS,不算业务错误
+- **凭据**:API key / token / 路径前缀**永远不进 SQLite / log / CLI 输出**
+- **依赖**:仅 [`pyproject.toml`](pyproject.toml);**不要新建 `requirements.txt`**
+- **I/O 边界**:Registry / SQLite / Quality Gate 都是同步接口;CLI / HTTP 是 thin wrapper,不在 wrapper 加业务规则
 
 ---
 
-## State Machine
+## 3. 测试约定
 
-```
-proposed → accepted → running → completed
-    ↓          ↓           ↓
-  rejected   rejected    failed
-```
-
-Also: `cancelled`, `superseded`.
-
----
-
-## CLI Commands (25 subcommands)
-
-`mac-agent <command> [options]`
-
-| Command | Description |
-|---------|-------------|
-| `contract --risk {low,medium,high}` | Generate risk-based TestContract |
-| `register --agent-id ... --name ... --capability ... [--allowed-path ...] [--forbidden-path ...]` | Register agent |
-| `discover --capability ...` | Find agents by capability |
-| `submit --task-id ... --type ... --summary ... [--plan-id ...] [--depends-on ...] [--risk ...]` | Submit task |
-| `status --task-id ...` | Print task status |
-| `tasks [--status] [--capability] [--agent-id] [--project-context]` | List tasks (read-only) |
-| `plan create --plan-id ... --goal ... --created-by ...` | Create collaboration plan |
-| `plan activate --plan-id ...` | Activate plan |
-| `plan close --plan-id ... [--status completed\|cancelled]` | Close plan |
-| `plan list` | List plans |
-| `ready-tasks [--capability ...]` | List dependency-unblocked proposed tasks |
-| `handoff --task-id ... --agent-id ... [--plan-id ...] [--verification ...] [--changed-file ...] [--risk ...]` | Save or print structured handoff |
-| `record-conflict --source ... --description ... [--plan-id ...] [--task-id ...] [--severity ...]` | Record a conflict |
-| `conflicts [--plan-id ...] [--resolved] [--unresolved]` | List conflicts |
-| `resolve-conflict --conflict-id ... --resolution ...` | Resolve a conflict |
-| `worker-packet --task-id ... --agent-id ...` | Print worker packet (Markdown) |
-| `review-packet --task-id ...` | Print review packet (Markdown) |
-| `task-evidence --task-id ...` | Print task evidence bundle (read-only) |
-| `quality-preview --task-id ...` | Preview quality gate (read-only) |
-| `task-readiness --task-id ...` | Preview next action (read-only) |
-| `accept --task-id ... --agent-id ...` | Accept handoff |
-| `start --task-id ... --agent-id ...` | Mark task running |
-| `quality --task-id ... --command ... --status passed\|failed --evidence ...` | Record quality evidence |
-| `complete --task-id ... --agent-id ...` | Complete after quality gate passes |
-| `fail --task-id ... --agent-id ... --error-code ...` | Fail task |
-| `audit --trace-id ...` | Print audit trail |
-| `claim --agent-id ... --capability ... [--best-effort]` | Claim next proposed task |
-| `run-once --agent-id ... --name ... --capability ... --command ...` | Run one adapter loop |
-| `observe --agent-id ... --capability ... --task-type ... --status ... --duration ...` | Record observed outcome |
-| `capability-score --agent-id ... --capability ...` | Print observed capability score |
-| `checkpoint --task-id ... --agent-id ... --summary ...` | Record recovery checkpoint |
-| `retry --task-id ... --agent-id ... [--fallback-agent-id ...]` | Retry failed task |
-| `cancel --task-id ... --agent-id ... [--reason ...]` | Cancel task |
+- **文件**:`tests/test_<subject>.py` 对应 `src/mac/<subject>.py`
+- **命名**:`test_<动作>_<对象>_<场景>`,helper 用 `_xxx()` 前缀
+- **临时数据库**:`pytest` 的 `tmp_path` fixture(不要硬编码路径)
+- **并发**:`ThreadPoolExecutor` + `Barrier` 触发竞争(参考 `tests/test_concurrency.py`)
+- **异步**:stdlib `asyncio.run()`(不要 `pytest-asyncio` / `anyio`,避免新依赖)
+- **契约**:改 [`protocol/messages.py`](src/mac/protocol/messages.py) schema 必须同 commit 改 [`tests/test_protocol.py`](tests/test_protocol.py)
 
 ---
 
-## Phase Status
+## 4. 协作守则(10 条以内)
 
-- **Phase 1.0–1.8**: Complete. Local MVP with SQLite ledger, CLI, HTTP, in-process adapter, task claiming, adapter templates, task visibility, evidence bundles, quality gate preview, and task readiness preview.
-- **Phase 1.9** (integrated): Failure recovery (`checkpoint`, `retry`, `cancel`), TaskEventBus.
-- **Phase A** (v0.2.0, current): Collaboration layer — Plan management, `depends_on` dependency tracking, `list_ready_tasks()`, `HandoffResult`, `ConflictRecord`, `PathRule`/`CoordinationPolicy`, `prepare_worker_packet()`/`prepare_review_packet()`, path guardrails, CLI collaboration commands (`ready-tasks`, `handoff`, `conflicts`, `record-conflict`, `resolve-conflict`, `worker-packet`, `review-packet`).
-- **Phase 2** (deferred): gRPC, Redis Pub/Sub, PostgreSQL, Cloud Bridge, Hybrid Bridge.
+**DO**:
 
----
+1. 改前先想影响面,commit message 写清触动的文件
+2. 改 schema / CLI / HTTP / Phase → 同 commit 改 [`docs/SPEC.md`](docs/SPEC.md)
+3. 同一错误重试 ≥ 2 次失败 → 停下来排查,不再"重试一次试试"
+4. 踩过的坑(耗时 ≥ 30 分钟)写进 [§5 已知陷阱](#5-已知陷阱)
 
-## Key Design Decisions
+**DON'T**:
 
-### A2A/MCP/MAC Boundary
-- **MCP**: resources, tools, context URIs. MAC does not replace it.
-- **A2A-compatible**: `TaskTransfer` has `task_id`, `trace_id`, status, summary, execution agent.
-- **MAC**: scheduling (capability/load/affinity), ledger (SQLite WAL + CAS), handoff (ContextBundle + TestContract), quality gate.
-
-### Read-Only Operations (no audit, no state mutation)
-- `list_tasks()`
-- `get_task_evidence()`
-- `preview_quality_gate()`
-- `preview_task_readiness()`
-
-### Risk-Based TestContract
-- **low**: `pytest related tests or smoke test`, evidence: `test_output`
-- **medium**: `python -m pytest tests`, evidence: `test_output`, `changed_files`
-- **high**: `python -m pytest --cov` (hard requirement), evidence: `test_output`, `coverage_report`, `review_notes`
+1. fallback 掩盖配置错误(SQLite 不可达 ≠ 静默 None;LLM 不可用 ≠ 空诊断)
+2. 引入执行引擎(LangGraph / Celery)—— MAC 是账本
+3. 拆 `Registry` 单体抽象 → 已有的 thin CLI / HTTP wrapper 足够
+4. 反射性加依赖("再装一个试试"先 grep 现有依赖)
+5. 改 git 历史(`--force push` / `reset --hard` / `commit --amend` 已 push 的)
 
 ---
 
-## What MAC Is Not
+## 5. 已知陷阱
 
-- Not an MCP replacement (MCP handles resources/tools)
-- Not a LangGraph/CrewAI replacement (MAC is a lightweight handoff protocol, not an execution engine)
-- Not a task queue (claim is a one-shot state transition, not a lease or long-poll)
-- Not a test framework (TestContract specifies what evidence is required; actual tests run elsewhere)
-- Not a streaming/log service (adapter loops are one-shot with captured stdout/stderr)
+| ID | 内容 | 状态 | 备注 |
+|----|------|------|------|
+| K-001 | `tests/test_release_readiness.py` `import tomllib` 必须 `try/except` 兜底 `tomli`(Py 3.10 兼容) | ✅ 已修 | 守 `requires-python = ">=3.10"` |
+| K-002 | Windows 离线 `WinError 10051` 不要直接用 `socket.socketpair()`,改 `multiprocessing.Pipe` 或 `asyncio.Queue` | ⚠️ 预防 | CI 启用时再加回归用例 |
+| K-003 | Python `match` / `X \| None` 是 3.10+ 语法,CI runner 不要锁 3.9 | ⚠️ 预防 | `pyproject.toml` 已守住 |
 
----
-
-## Known Constraints
-
-- SQLite WAL for single-instance; multi-instance strong consistency in Phase 2 PostgreSQL
-- ContextBundle quality determines handoff quality; MAC enforces structure, not comprehension
-- Quality Gate checks evidence vs. contract; it does not judge test quality
-- Observed capability metrics are observations, not credentials or SLAs
+新踩到的:**同格式追加一行**(就追加,别再开 `KNOWN_ISSUES.md` 文件)。
 
 ---
 
-## Testing
+## 6. 文档治理
 
-```bash
-python -m pytest -q          # 118 tests
-python examples/local_handoff.py
-python examples/local_runner.py
-python -m compileall -q src examples
-```
+- **真相源**:`docs/SPEC.md` 是架构 + 端点契约唯一源
+- **三同步**:改 API / CLI / HTTP 任何一项 → `SPEC.md` + `CLAUDE.md`(本文件) + 必要时 `README.md` 同 commit
+- **不变量**:文档不引用未实现的代码;改 schema 后先跑 `pytest tests/test_protocol.py` 再 commit
 
 ---
 
-## Document Update Rule
+## 7. 调试 SOP
 
-Any code change that modifies public API, CLI commands, HTTP endpoints, or architecture **MUST** update all three documents in the same commit:
+1. `python -m pytest tests/ -q` — 全过则大概率 OK
+2. `python examples/local_handoff.py` — 最小协作流程
+3. `python examples/local_runner.py` — adapter loop
+4. 搜 `MACError` 子类 — 看上层有没有吞掉异常
+5. 查 [§5 已知陷阱](#5-已知陷阱) — 重复问题先看这里
 
-- `README.md` — install, quick start, API example (English section + Chinese section)
-- `docs/SPEC.md` — architecture, endpoints, phase status
-- `CLAUDE.md` — this file
+---
 
-No document shall reference code that does not exist.
+## 8. 参考与边界
 
-Documents are organized by language: English content first, Chinese content after the `====` separator. Both sections must be kept in sync.
+- **不做**:gRPC / Redis / Postgres / ORM 层 / 执行引擎 / Docker / gitleaks / CI(全部 deferred,见 SPEC §8)
+- **AI 工具栈**:Claude Code / Qoder / Trae / Cursor 都能接 MCP server;MAC 提供 CLI 协议,不绑死工具链
+- **借鉴**:本文件设计参考过同类多智能体项目的 governance 经验(2026-07-22 调研),采纳最小子集,其余过设计内容未采用
