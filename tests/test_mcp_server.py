@@ -374,8 +374,11 @@ class TestToolErrorIsErrorFlag:
     code path the stdio transport invokes. Does not require a subprocess.
     """
 
-    @pytest.mark.asyncio
-    async def test_not_found_sets_iserror_true(self) -> None:
+    def test_not_found_sets_iserror_true(self) -> None:
+        asyncio.run(self._test_not_found())
+
+    @staticmethod
+    async def _test_not_found() -> None:
         from mcp import types
 
         from mac.mcp_server import mcp
@@ -391,8 +394,11 @@ class TestToolErrorIsErrorFlag:
         assert result.root.isError is True
         assert "not_found" in result.root.content[0].text
 
-    @pytest.mark.asyncio
-    async def test_validation_error_sets_iserror_true(self) -> None:
+    def test_validation_error_sets_iserror_true(self) -> None:
+        asyncio.run(self._test_validation_error())
+
+    @staticmethod
+    async def _test_validation_error() -> None:
         from mcp import types
 
         from mac.mcp_server import mcp
@@ -412,8 +418,11 @@ class TestToolErrorIsErrorFlag:
         assert result.root.isError is True
         assert "validation" in result.root.content[0].text.lower()
 
-    @pytest.mark.asyncio
-    async def test_success_sets_iserror_false(self, tmp_path: Path) -> None:
+    def test_success_sets_iserror_false(self, tmp_path: Path) -> None:
+        asyncio.run(self._test_success(tmp_path))
+
+    @staticmethod
+    async def _test_success(tmp_path: Path) -> None:
         from mcp import types
 
         from mac.mcp_server import mcp
