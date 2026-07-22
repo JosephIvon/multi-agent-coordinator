@@ -6,6 +6,7 @@ from mac.protocol.messages import (
     AgentCapability,
     AgentCard,
     ConflictRecord,
+    CoordinationPolicy,
     HandoffResult,
     PathRule,
     Plan,
@@ -466,3 +467,226 @@ def test_apply_path_guardrails_resets_block_to_pass_when_no_violations_remain(tm
     )
     assert cleared.boundary_review == "pass"
     assert cleared.violated_guardrail == []
+
+
+# ---------------------------------------------------------------------------
+# P5-2: Review lifecycle tests — mark_review_ready, accept_review, reject_review
+# ---------------------------------------------------------------------------
+
+
+def _review_registry(tmp_path, *, events: list | None = None) -> Registry:
+    """Create a Registry with require_review=True."""
+    bus = TaskEventBus()
+    if events is not None:
+        bus.subscribe(events.append)
+    return Registry(
+        SQLiteTaskLedger(tmp_path / "mac.db"),
+        event_bus=bus,
+        policy=CoordinationPolicy(require_review=True),
+    )
+
+
+def _running_task(task_id: str = "task-1", **updates) -> TaskTransfer:
+    """A task already in 'running' status, ready for review lifecycle."""
+    return _task(task_id, status="running", **updates)
+
+
+def test_mark_review_ready_transitions_running_to_review_ready(tmp_path):
+    events: list = []
+    registry = _review_registry(tmp_path, events=events)
+    registry.submit_task(_running_task())
+
+    result = registry.mark_review_ready("task-1", agent_id="worker")
+
+    assert result.status == "review_ready"
+    assert [event.type for event in events[-1:]] == ["task_review_ready"]
+
+
+def test_mark_review_ready_saves_handoff_when_provided(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+    handoff = HandoffResult(
+        task_id="task-1",
+        agent_id="worker",
+        changed_files=["src/main.py"],
+        verification=[VerificationEntry(command="pytest", result="pass")],
+    )
+
+    registry.mark_review_ready("task-1", agent_id="worker", handoff=handoff)
+
+    saved = registry.get_handoff_result("task-1")
+    assert saved is not None
+    assert saved.changed_files == ["src/main.py"]
+
+
+def test_mark_review_ready_rejects_when_require_review_is_false(tmp_path):
+    registry = Registry(
+        SQLiteTaskLedger(tmp_path / "mac.db"),
+        policy=CoordinationPolicy(require_review=False),
+    )
+    registry.submit_task(_running_task())
+
+    with pytest.raises(StateConflictError, match="require_review is False"):
+        registry.mark_review_ready("task-1", agent_id="worker")
+
+
+def test_mark_review_ready_rejects_non_running_status(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_task("task-1", status="proposed"))
+
+    with pytest.raises(StateConflictError, match="expected 'running'"):
+        registry.mark_review_ready("task-1", agent_id="worker")
+
+
+def test_complete_task_blocked_when_require_review_is_true(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+
+    with pytest.raises(StateConflictError, match="requires review"):
+        registry.complete_task("task-1", agent_id="worker")
+
+
+def test_complete_task_still_works_when_require_review_is_false(tmp_path):
+    registry = Registry(
+        SQLiteTaskLedger(tmp_path / "mac.db"),
+        policy=CoordinationPolicy(require_review=False),
+    )
+    registry.submit_task(_running_task())
+
+    result = registry.complete_task("task-1", agent_id="worker")
+
+    assert result.status == "completed"
+
+
+def test_accept_review_transitions_review_ready_to_completed(tmp_path):
+    events: list = []
+    registry = _review_registry(tmp_path, events=events)
+    registry.submit_task(_running_task())
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    result = registry.accept_review("task-1", reviewer_id="reviewer")
+
+    assert result.status == "completed"
+    assert [event.type for event in events[-1:]] == ["task_review_accepted"]
+
+
+def test_accept_review_rejects_non_review_ready_status(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+
+    with pytest.raises(StateConflictError, match="expected 'review_ready'"):
+        registry.accept_review("task-1", reviewer_id="reviewer")
+
+
+def test_reject_review_transitions_review_ready_to_rejected(tmp_path):
+    events: list = []
+    registry = _review_registry(tmp_path, events=events)
+    registry.submit_task(_running_task())
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    result = registry.reject_review("task-1", reviewer_id="reviewer", reason="Missing tests")
+
+    assert result.status == "rejected"
+    assert [event.type for event in events[-1:]] == ["task_review_rejected"]
+
+
+def test_reject_review_auto_records_conflict(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.create_plan(goal="Review flow", created_by="planner", plan_id="plan-1")
+    registry.submit_task(_running_task("task-1", plan_id="plan-1"))
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    registry.reject_review("task-1", reviewer_id="reviewer", reason="Missing tests")
+
+    conflicts = registry.list_conflicts(plan_id="plan-1", resolved=False)
+    assert len(conflicts) == 1
+    assert conflicts[0].source == "reject_review"
+    assert conflicts[0].description == "Missing tests"
+    assert "reviewer" in conflicts[0].involved_agents
+
+
+def test_reject_review_uses_default_description_when_no_reason(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    registry.reject_review("task-1", reviewer_id="reviewer")
+
+    conflicts = registry.list_conflicts()
+    assert len(conflicts) == 1
+    assert "rejected by reviewer" in conflicts[0].description
+
+
+def test_reject_review_rejects_non_review_ready_status(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+
+    with pytest.raises(StateConflictError, match="expected 'review_ready'"):
+        registry.reject_review("task-1", reviewer_id="reviewer", reason="bad")
+
+
+def test_review_ready_task_not_claimable(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.register(
+        AgentCard(
+            agent_id="worker",
+            name="Worker",
+            capabilities=[AgentCapability(name="write_code")],
+        )
+    )
+    registry.submit_task(_running_task())
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    # review_ready tasks should not appear in ready list
+    ready = registry.list_ready_tasks(capability="write_code")
+    assert ready == []
+
+    # claim_next_task should skip review_ready tasks
+    claimed = registry.claim_next_task(agent_id="worker", capability="write_code")
+    assert claimed is None
+
+
+def test_cancel_task_allowed_from_review_ready(tmp_path):
+    registry = _review_registry(tmp_path)
+    registry.submit_task(_running_task())
+    registry.mark_review_ready("task-1", agent_id="worker")
+
+    result = registry.cancel_task("task-1", agent_id="worker", reason="Abandoned")
+
+    assert result.status == "cancelled"
+
+
+def test_full_review_lifecycle_with_events(tmp_path):
+    events: list = []
+    registry = _review_registry(tmp_path, events=events)
+    registry.register(
+        AgentCard(
+            agent_id="worker",
+            name="Worker",
+            capabilities=[AgentCapability(name="write_code")],
+        )
+    )
+    registry.create_plan(goal="Full review flow", created_by="planner", plan_id="plan-1")
+
+    # Submit → claim → start → mark_review_ready → accept_review
+    registry.submit_task(_task("task-1", plan_id="plan-1"))
+    claimed = registry.claim_next_task(agent_id="worker", capability="write_code")
+    assert claimed is not None
+    registry.start_task("task-1", agent_id="worker")
+    registry.mark_review_ready(
+        "task-1",
+        agent_id="worker",
+        handoff=HandoffResult(
+            task_id="task-1",
+            plan_id="plan-1",
+            agent_id="worker",
+            verification=[VerificationEntry(command="pytest -q", result="pass")],
+            changed_files=["src/feature.py"],
+        ),
+    )
+    result = registry.accept_review("task-1", reviewer_id="reviewer")
+
+    assert result.status == "completed"
+    event_types = [event.type for event in events]
+    assert "task_review_ready" in event_types
+    assert "task_review_accepted" in event_types

@@ -116,6 +116,8 @@ class ConflictRecord(BaseModel):
 
 ## 3. Task State Machine
 
+### Default (`require_review=False`)
+
 ```text
 proposed -> accepted -> running -> completed
     |          |           |
@@ -124,14 +126,28 @@ proposed -> accepted -> running -> completed
                          cancelled
 ```
 
+### With Review (`require_review=True`)
+
+```text
+proposed -> accepted -> running -> review_ready -> completed
+    |          |           |           |
+    v          v           v           v
+ rejected   rejected     failed     rejected
+                                     (reason → conflict)
+                         cancelled
+```
+
 Rules:
 
 - `proposed -> accepted`: explicit accept or `claim_next_task()`.
 - `accepted -> running`: `start_task()`.
-- `running -> completed`: `complete_task()` after the quality gate allows completion.
+- `running -> completed`: `complete_task()` after the quality gate allows completion (only when `require_review=False`).
+- `running -> review_ready`: `mark_review_ready()` (only when `require_review=True`). Optionally saves handoff.
+- `review_ready -> completed`: `accept_review()`.
+- `review_ready -> rejected`: `reject_review()`. Rejection reason is automatically recorded as a `ConflictRecord` with `source="reject_review"`.
 - `running -> failed`: `fail_task()`.
-- Any non-terminal task can become `cancelled`.
-- Phase A does not change `complete_task()` into a review workflow.
+- Any non-terminal task (including `review_ready`) can become `cancelled`.
+- When `require_review=True`, calling `complete_task()` on a `running` task raises `StateConflictError`.
 
 ---
 
@@ -172,12 +188,36 @@ If no allowed or forbidden patterns exist, no checking is performed. If any patt
 
 ---
 
+## 5.1 Coordination Policy
+
+`CoordinationPolicy` controls optional coordination features. It is passed to `Registry` at construction and can be loaded from environment variables.
+
+```python
+class CoordinationPolicy(BaseModel):
+    require_review: bool = False
+    require_path_check: bool = False
+    path_rule: PathRule = Field(default_factory=PathRule)
+    max_retry_count: int = Field(default=3, ge=0)
+```
+
+Environment variable mapping (`from_env()`):
+
+| Variable | Effect |
+|----------|--------|
+| `MAC_REQUIRE_REVIEW` | Truthy → `require_review=True` |
+| `MAC_REQUIRE_PATH_CHECK` | Truthy → `require_path_check=True` |
+| `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
+| `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
+
+---
+
 ## 6. Registry API
 
 Main operations:
 
 - Agent: `register()`, `discover()`, `heartbeat_agent()`
 - Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `fail_task()`, `cancel_task()`
+- Review: `mark_review_ready()`, `accept_review()`, `reject_review()`
 - Quality: `submit_quality_result()`, `preview_quality_gate()`, `preview_task_readiness()`
 - Plan: `create_plan()`, `activate_plan()`, `close_plan()`, `list_plans()`
 - Dependency: `list_ready_tasks()`
@@ -249,7 +289,7 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (8)
+### Tools (11)
 
 | Tool | Parameters | Returns | Side Effect |
 |------|-----------|---------|-------------|
@@ -261,12 +301,17 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_list_ready_tasks` | `capability?`, `project_context?` | JSON array of TaskTransfer | read-only |
 | `mac_review_packet` | `task_id` | Markdown string | read-only |
 | `mac_worker_packet` | `task_id`, `agent_id?` | Markdown string | read-only |
+| `mac_mark_review_ready` | `task_id`, `agent_id`, `handoff?` | JSON TaskTransfer | write |
+| `mac_accept_review` | `task_id`, `reviewer_id` | JSON TaskTransfer | write |
+| `mac_reject_review` | `task_id`, `reviewer_id`, `reason?` | JSON TaskTransfer | write |
 
 `mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
 
 `mac_record_quality_and_complete` is atomic: `submit_quality_result` → `evaluate_quality_gate` → `complete_task` (only if gate passes). Returns `status='completed'` or `status='running'` with reason.
 
 `mac_worker_packet` includes the agent's `allowed_paths` and `forbidden_paths` when `agent_id` is provided.
+
+Review tools are only effective when `CoordinationPolicy.require_review=True`. `mac_mark_review_ready` transitions `running → review_ready`. `mac_accept_review` transitions `review_ready → completed`. `mac_reject_review` transitions `review_ready → rejected` and auto-records a conflict with `source="reject_review"`.
 
 ### Resources (2)
 
@@ -279,7 +324,6 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 
 ## 10. Deferred Work
 
-- Review lifecycle states (`review_ready`, `accept_review`, `reject_review`) behind a policy switch.
 - Leases, daemon workers, and automatic external-agent execution.
 - Parallel group planning and DAG visualization.
 - Redis, Postgres, gRPC, and cloud synchronization.

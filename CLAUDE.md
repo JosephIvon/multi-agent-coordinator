@@ -11,8 +11,8 @@
 - **版本**:0.3.0 Alpha | **Python**:≥ 3.10 | **License**:MIT
 - **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
-- **状态机**:`proposed → accepted → running → completed`(另含 `rejected` / `failed` / `cancelled` / `superseded`)
-- **测试**:pytest ~178 用例,跑 `python -m pytest tests/ -q`
+- **状态机**:`proposed → accepted → running → completed`(另含 `review_ready` / `rejected` / `failed` / `cancelled` / `superseded`;`review_ready` 仅 `require_review=True` 时启用)
+- **测试**:pytest ~211 用例,跑 `python -m pytest tests/ -q`
 
 ---
 
@@ -116,7 +116,7 @@ src/mac/
 
 ## 9. MCP Server 指引
 
-AI 编码工具通过 MCP 接入 MAC,8 tools + 2 resources:
+AI 编码工具通过 MCP 接入 MAC,11 tools + 2 resources:
 
 | Tool | 作用 | 副作用 |
 |------|------|--------|
@@ -128,6 +128,9 @@ AI 编码工具通过 MCP 接入 MAC,8 tools + 2 resources:
 | `mac_list_ready_tasks` | 列出可认领任务 | 只读 |
 | `mac_review_packet` | 生成 reviewer prompt(Markdown) | 只读 |
 | `mac_worker_packet` | 生成 worker prompt(Markdown,含边界) | 只读 |
+| `mac_mark_review_ready` | running → review_ready(需 require_review=True) | 写 |
+| `mac_accept_review` | review_ready → completed | 写 |
+| `mac_reject_review` | review_ready → rejected(自动记录冲突) | 写 |
 
 Resources: `mac://capabilities`(能力清单), `mac://health`(健康状态)。
 

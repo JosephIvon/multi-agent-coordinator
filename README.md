@@ -191,7 +191,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (8)
+### Available Tools (11)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -203,6 +203,9 @@ claude mcp add mac -- mac-mcp-server
 | `mac_list_ready_tasks` | List claimable tasks | read-only |
 | `mac_review_packet` | Generate reviewer prompt (Markdown) | read-only |
 | `mac_worker_packet` | Generate worker prompt (Markdown) | read-only |
+| `mac_mark_review_ready` | Move task to review_ready (requires `require_review=True`) | write |
+| `mac_accept_review` | Accept reviewed task → completed | write |
+| `mac_reject_review` | Reject reviewed task → rejected (auto-records conflict) | write |
 
 ### Available Resources (2)
 
@@ -239,6 +242,34 @@ HTTP: `GET /metrics` returns the same dict as JSON.
 
 ---
 
+## Coordination Policy
+
+Optional features are controlled by `CoordinationPolicy`, passed to `Registry` or loaded from environment variables:
+
+```python
+from mac.registry import Registry
+from mac.protocol.messages import CoordinationPolicy
+from mac.storage.sqlite import SQLiteTaskLedger
+
+# Explicit policy
+policy = CoordinationPolicy(require_review=True)
+registry = Registry(SQLiteTaskLedger("mac.db"), policy=policy)
+
+# Or from environment (MAC_REQUIRE_REVIEW=1, etc.)
+registry = Registry(SQLiteTaskLedger("mac.db"))
+```
+
+| Variable | Effect |
+|----------|--------|
+| `MAC_REQUIRE_REVIEW` | Truthy → tasks go through `review_ready` before `completed` |
+| `MAC_REQUIRE_PATH_CHECK` | Truthy → enforce path guardrails on handoff |
+| `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
+| `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
+
+When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use `mark_review_ready()` → `accept_review()`/`reject_review()` instead.
+
+---
+
 ## What It Can Do
 
 - Coordinate local multi-agent task work through SQLite WAL.
@@ -250,6 +281,7 @@ HTTP: `GET /metrics` returns the same dict as JSON.
 - Record and resolve conflicts.
 - Generate worker and review Markdown packets for human-mediated agent handoff.
 - Enforce risk-based quality evidence before completing tasks with a `TestContract`.
+- Optional review lifecycle: `mark_review_ready` → `accept_review`/`reject_review` (controlled by `CoordinationPolicy.require_review`).
 - Expose 6 aggregate metrics for observability (cycle time, handoff/quality pass rates, retry/conflict rates, active agents).
 
 ## What It Cannot Do Yet
