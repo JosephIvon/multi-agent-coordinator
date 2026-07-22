@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import TaskTransfer
@@ -23,9 +24,12 @@ def _registry() -> Registry:
 
 
 def _serialize(result: Any) -> str:
-    """Serialize a Pydantic model, list of models, dict, or primitive to JSON."""
-    if result is None:
-        return json.dumps({"error": "not_found"})
+    """Serialize a Pydantic model, list of models, dict, or primitive to JSON.
+
+    Only handles success paths. ``None`` and error conditions are reported
+    by ``_safe_call`` raising ``ToolError`` so the MCP transport can mark
+    the response with ``isError=True``.
+    """
     if isinstance(result, list):
         items = [r.model_dump() if hasattr(r, "model_dump") else r for r in result]
         return json.dumps(items)
@@ -37,23 +41,33 @@ def _serialize(result: Any) -> str:
 
 
 def _safe_call(func: Any) -> str:
-    """Execute *func*, catching MAC domain errors and returning readable strings."""
+    """Execute *func*, raising :class:`ToolError` for any failure.
+
+    MAC domain exceptions are translated into structured ``ToolError``
+    messages so the SDK can mark the response with ``isError=True`` and
+    LLM clients can distinguish success from failure.
+    """
     from pydantic import ValidationError
 
     try:
-        return _serialize(func())
+        result = func()
+    except ToolError:
+        raise
     except KeyError as exc:
-        return json.dumps({"error": "not_found", "detail": str(exc)})
+        raise ToolError(f"not_found: {exc}") from exc
     except ValidationError as exc:
-        return json.dumps({"error": "validation_failed", "detail": str(exc.errors())})
+        raise ToolError(f"validation_failed: {exc.errors()}") from exc
     except QualityGateError as exc:
-        return json.dumps({"error": "quality_gate_failed", "detail": str(exc)})
+        raise ToolError(f"quality_gate_failed: {exc}") from exc
     except StateConflictError as exc:
-        return json.dumps({"error": "state_conflict", "detail": str(exc)})
+        raise ToolError(f"state_conflict: {exc}") from exc
+    if result is None:
+        raise ToolError("not_found")
+    return _serialize(result)
 
 
 # ---------------------------------------------------------------------------
-# Tools (7)
+# Tools (8)
 # ---------------------------------------------------------------------------
 
 
@@ -231,6 +245,26 @@ def mac_review_packet(task_id: str) -> str:
 
     def _do() -> Any:
         return _registry().prepare_review_packet(task_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_worker_packet(task_id: str, agent_id: str | None = None) -> str:
+    """Generate a Markdown worker packet for a task.
+
+    Mirrors mac_review_packet on the worker side: provides goal, dependency
+    context, acceptance criteria, and (when agent_id is given) the agent's
+    boundary guardrails so the worker knows what it can touch.
+
+    :param task_id: ID of the task.
+    :param agent_id: Optional agent ID; when supplied the packet includes
+        the agent's allowed_paths and forbidden_paths.
+    :returns: Markdown string with worker-facing task instructions.
+    """
+
+    def _do() -> Any:
+        return _registry().prepare_worker_packet(task_id, agent_id=agent_id)
 
     return _safe_call(_do)
 

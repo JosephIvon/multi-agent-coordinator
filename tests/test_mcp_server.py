@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 from mac.mcp_server import (
     capabilities_resource,
     health_resource,
@@ -18,6 +20,7 @@ from mac.mcp_server import (
     mac_review_packet,
     mac_save_handoff,
     mac_submit_task,
+    mac_worker_packet,
     mcp,
 )
 from mac.protocol.messages import (
@@ -111,9 +114,9 @@ class TestMacSubmitTask:
         assert parsed["plan_id"] == "plan-1"
 
     def test_submit_invalid_shape_returns_error(self) -> None:
-        result = mac_submit_task({"bad": "data"})
-        # Pydantic validation should produce an error string
-        assert "error" in result.lower() or "validation" in result.lower()
+        with pytest.raises(ToolError) as excinfo:
+            mac_submit_task({"bad": "data"})
+        assert "validation_failed" in str(excinfo.value)
 
 
 class TestMacClaimTask:
@@ -134,9 +137,9 @@ class TestMacClaimTask:
         assert parsed["status"] == "running"
 
     def test_claim_no_matching_task_returns_not_found(self) -> None:
-        result = mac_claim_task(agent_id="agent-1", capability="nonexistent")
-        parsed = json.loads(result)
-        assert parsed.get("error") == "not_found"
+        with pytest.raises(ToolError) as excinfo:
+            mac_claim_task(agent_id="agent-1", capability="nonexistent")
+        assert "not_found" in str(excinfo.value)
 
 
 class TestMacRecordQualityAndComplete:
@@ -281,9 +284,161 @@ class TestMacReviewPacket:
         assert "##" in result  # Markdown header
 
     def test_review_packet_not_found(self) -> None:
-        result = mac_review_packet(task_id="nonexistent")
-        parsed = json.loads(result)
-        assert parsed.get("error") == "not_found"
+        with pytest.raises(ToolError) as excinfo:
+            mac_review_packet(task_id="nonexistent")
+        assert "not_found" in str(excinfo.value)
+
+
+class TestMacWorkerPacket:
+    def test_worker_packet_returns_markdown_after_claim(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent())
+        reg.submit_task(
+            TaskTransfer(
+                task_id="task-1",
+                source_agent_id="planner",
+                payload=TaskPayload(type="write_code", summary="Ship worker packet"),
+            )
+        )
+        claimed = reg.claim_next_task(agent_id="agent-1", capability="write_code")
+        assert claimed is not None
+
+        result = mac_worker_packet(task_id="task-1", agent_id="agent-1")
+
+        assert "Worker Task: task-1" in result
+        assert "## Goal" in result
+        assert "## Acceptance Criteria" in result
+        assert "## Handoff Format" in result
+
+    def test_worker_packet_includes_agent_boundary_when_agent_id_given(
+        self, tmp_path: Path
+    ) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(
+            AgentCard(
+                agent_id="agent-1",
+                name="agent-1",
+                capabilities=[AgentCapability(name="write_code")],
+                allowed_paths=["src/**"],
+                forbidden_paths=["src/secrets/**"],
+            )
+        )
+        reg.submit_task(
+            TaskTransfer(
+                task_id="task-1",
+                source_agent_id="planner",
+                payload=TaskPayload(type="write_code", summary="Ship worker packet"),
+            )
+        )
+        reg.claim_next_task(agent_id="agent-1", capability="write_code")
+
+        result = mac_worker_packet(task_id="task-1", agent_id="agent-1")
+
+        assert "## Agent Boundary" in result
+        assert "src/**" in result
+        assert "src/secrets/**" in result
+
+    def test_worker_packet_omits_boundary_when_agent_id_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.submit_task(
+            TaskTransfer(
+                task_id="task-1",
+                source_agent_id="planner",
+                payload=TaskPayload(type="write_code", summary="Just task, no agent"),
+            )
+        )
+
+        result = mac_worker_packet(task_id="task-1")
+
+        assert "Worker Task: task-1" in result
+        assert "## Agent Boundary" not in result
+
+    def test_worker_packet_not_found(self) -> None:
+        with pytest.raises(ToolError) as excinfo:
+            mac_worker_packet(task_id="nonexistent")
+        assert "not_found" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Transport-layer error semantics (isError=True via MCP request handler)
+# ---------------------------------------------------------------------------
+
+
+class TestToolErrorIsErrorFlag:
+    """Exercise the low-level MCP request handler so we can assert that
+    MAC domain errors surface as ``CallToolResult(isError=True)``.
+
+    Runs in-process via ``mcp._mcp_server.request_handlers`` — the same
+    code path the stdio transport invokes. Does not require a subprocess.
+    """
+
+    @pytest.mark.asyncio
+    async def test_not_found_sets_iserror_true(self) -> None:
+        from mcp import types
+
+        from mac.mcp_server import mcp
+
+        handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            params=types.CallToolRequestParams(
+                name="mac_claim_task",
+                arguments={"agent_id": "agent-1", "capability": "nonexistent"},
+            )
+        )
+        result = await handler(req)
+        assert result.root.isError is True
+        assert "not_found" in result.root.content[0].text
+
+    @pytest.mark.asyncio
+    async def test_validation_error_sets_iserror_true(self) -> None:
+        from mcp import types
+
+        from mac.mcp_server import mcp
+
+        handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            params=types.CallToolRequestParams(
+                name="mac_submit_task",
+                arguments={"bad": "data"},
+            )
+        )
+        result = await handler(req)
+        # The Pydantic ValidationError is raised by FastMCP's arg validator
+        # *before* entering _safe_call, so the SDK wraps it as a ToolError.
+        # We only need to confirm isError=True; the precise text format
+        # is SDK-owned.
+        assert result.root.isError is True
+        assert "validation" in result.root.content[0].text.lower()
+
+    @pytest.mark.asyncio
+    async def test_success_sets_iserror_false(self, tmp_path: Path) -> None:
+        from mcp import types
+
+        from mac.mcp_server import mcp
+
+        reg, _ = _registry_with_db(tmp_path)
+        reg.submit_task(
+            TaskTransfer(
+                task_id="task-1",
+                source_agent_id="planner",
+                payload=TaskPayload(type="write_code", summary="Do work"),
+            )
+        )
+
+        handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
+        req = types.CallToolRequest(
+            params=types.CallToolRequestParams(
+                name="mac_list_ready_tasks",
+                arguments={"capability": "write_code"},
+            )
+        )
+        result = await handler(req)
+        assert result.root.isError is False
+        parsed = json.loads(result.root.content[0].text)
+        assert len(parsed) == 1
+        assert parsed[0]["task_id"] == "task-1"
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +529,7 @@ class TestStdioE2E:
                 result = await session.initialize()
                 assert result.serverInfo.name == "mac-coordinator"
 
-                # 2. List tools — expect 7
+                # 2. List tools — expect 8
                 tools_result = await session.list_tools()
                 tool_names = {tool.name for tool in tools_result.tools}
                 assert tool_names == {
@@ -385,6 +540,7 @@ class TestStdioE2E:
                     "mac_review_packet",
                     "mac_save_handoff",
                     "mac_submit_task",
+                    "mac_worker_packet",
                 }
 
                 # 3. List resources — expect 2
@@ -395,13 +551,23 @@ class TestStdioE2E:
                     "mac://health",
                 }
 
-                # 4. Call a read-only tool
+                # 4. Call a read-only tool (happy path)
                 ready_result = await session.call_tool(
                     "mac_list_ready_tasks",
                     arguments={"capability": "write_code"},
                 )
                 # Result is a list of TextContent; parse the first one
+                assert ready_result.isError is False
                 assert len(ready_result.content) >= 1
                 text = ready_result.content[0].text
                 parsed = json.loads(text)
                 assert parsed == []  # empty ledger → no ready tasks
+
+                # 5. Call a tool that triggers a domain error; expect isError=True
+                #    (the real MCP contract — distinct from legacy JSON error string).
+                err_result = await session.call_tool(
+                    "mac_claim_task",
+                    arguments={"agent_id": "agent-1", "capability": "nonexistent"},
+                )
+                assert err_result.isError is True
+                assert "not_found" in err_result.content[0].text
