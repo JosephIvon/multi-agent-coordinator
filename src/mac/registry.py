@@ -382,6 +382,71 @@ class Registry:
             raise QualityGateError(reason or "quality_gate_failed")
         return self._transition(task_id, "completed", expected_status="running", agent_id=agent_id, action="complete_task")
 
+    def done(
+        self,
+        task_id: str,
+        agent_id: str,
+        *,
+        quality_result: dict[str, Any] | None = None,
+        handoff: HandoffResult | None = None,
+    ) -> dict[str, Any]:
+        """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
+
+        Automatically detects whether to complete or mark review-ready based on
+        ``CoordinationPolicy.require_review``.  This is the single entry point
+        for finishing a task — callers no longer need to know the state machine.
+
+        :param task_id: ID of the running task.
+        :param agent_id: ID of the agent finishing the task.
+        :param quality_result: Optional quality evidence dict (must include
+            ``command`` and ``status``).  If ``None``, any previously submitted
+            quality results are used for gate evaluation.
+        :param handoff: Optional :class:`HandoffResult` to save before
+            completing / marking review-ready.
+        :returns: A summary dict with keys ``status``, ``task_id``,
+            ``quality_gate``, and optionally ``review`` and ``reason``.
+        """
+        # 1. Submit quality evidence if provided.
+        if quality_result is not None:
+            self.submit_quality_result(task_id, quality_result)
+
+        # 2. Evaluate quality gate against current-attempt results.
+        task = self._get_task(task_id)
+        quality_results = _current_attempt_quality_results(
+            task, self.ledger.get_quality_results(task_id),
+        )
+        allowed, reason = evaluate_quality_gate(task.test_contract, quality_results)
+
+        if not allowed:
+            return {
+                "status": "running",
+                "task_id": task_id,
+                "quality_gate": "failed",
+                "reason": reason,
+            }
+
+        # 3. Branch on require_review.
+        if self.policy.require_review:
+            # mark_review_ready() saves handoff internally when provided.
+            self.mark_review_ready(task_id, agent_id, handoff=handoff)
+            return {
+                "status": "review_ready",
+                "task_id": task_id,
+                "quality_gate": "passed",
+                "review": True,
+            }
+
+        # No review required: save handoff first, then complete.
+        if handoff is not None:
+            self.save_handoff_result(handoff)
+        self.complete_task(task_id, agent_id)
+        return {
+            "status": "completed",
+            "task_id": task_id,
+            "quality_gate": "passed",
+            "review": False,
+        }
+
     # ------------------------------------------------------------------
     # Reviewer capability guard (B-5)
     # ------------------------------------------------------------------

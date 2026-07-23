@@ -67,7 +67,7 @@ def _safe_call(func: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools (14)
+# Tools (15)
 # ---------------------------------------------------------------------------
 
 
@@ -131,6 +131,9 @@ def mac_record_quality_and_complete(
     One-step atomic: submit_quality_result → evaluate_quality_gate →
     complete_task (only if gate passes).
 
+    .. deprecated:: Prefer ``mac_done`` which also handles handoff and review
+        lifecycle automatically.
+
     :param task_id: ID of the task.
     :param agent_id: ID of the agent submitting evidence.
     :param result: Quality result dict (must include 'command' and 'status').
@@ -150,6 +153,54 @@ def mac_record_quality_and_complete(
             completed = reg.complete_task(task_id, agent_id)
             return {"status": "completed", "task_id": task_id, "reason": reason}
         return {"status": "running", "task_id": task_id, "reason": reason}
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_done(
+    task_id: str,
+    agent_id: str,
+    quality_result: dict | None = None,
+    changed_files: list[str] | None = None,
+    risks: list[str] | None = None,
+) -> str:
+    """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
+
+    Automatically detects whether to complete or mark review-ready based on
+    the CoordinationPolicy (``require_review``).  This is the primary way
+    AI agents finish tasks — no need to know the state machine.
+
+    :param task_id: ID of the running task.
+    :param agent_id: ID of the agent finishing the task.
+    :param quality_result: Optional quality evidence dict (must include
+        ``command`` and ``status`` when provided).  If omitted, previously
+        submitted quality results are used for gate evaluation.
+    :param changed_files: List of files modified during work.
+    :param risks: List of risk descriptions.
+    :returns: JSON summary with ``status``, ``task_id``, ``quality_gate``,
+        and optionally ``review`` and ``reason``.
+    """
+
+    def _do() -> Any:
+        from mac.protocol.messages import HandoffResult, VerificationEntry
+
+        reg = _registry()
+        handoff = None
+        if changed_files or risks:
+            handoff = HandoffResult(
+                task_id=task_id,
+                agent_id=agent_id,
+                changed_files=changed_files or [],
+                risks=risks or [],
+                verification=[VerificationEntry(command="done", result="pass")],
+            )
+        return reg.done(
+            task_id,
+            agent_id,
+            quality_result=quality_result,
+            handoff=handoff,
+        )
 
     return _safe_call(_do)
 

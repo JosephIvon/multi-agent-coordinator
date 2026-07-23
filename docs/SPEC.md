@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.4
+> Version: 2.5
 > Date: 2026-07-23
 > Status: implemented for Phase C production readiness
 
@@ -220,7 +220,7 @@ Environment variable mapping (`from_env()`):
 Main operations:
 
 - Agent: `register()`, `discover()`, `heartbeat_agent()`
-- Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `fail_task()`, `cancel_task()`
+- Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `done()`, `fail_task()`, `cancel_task()`
 - Review: `mark_review_ready()`, `accept_review()`, `reject_review()`
 - Quality: `submit_quality_result()`, `preview_quality_gate()`, `preview_task_readiness()`
 - Plan: `create_plan()`, `activate_plan()`, `close_plan()`, `list_plans()`
@@ -329,6 +329,23 @@ CLI uses Python `logging` module instead of `print()` for diagnostic output. Mac
 
 `mac-agent dashboard` shows a concise project overview: active plans with task counts, ready/in-flight/review-ready tasks, online agents, unresolved conflicts, and key metrics.
 
+### C-6: Done Command
+
+`done()` is the single entry point for finishing a task. It atomically orchestrates: submit quality evidence (if provided) → evaluate quality gate → save handoff (if provided) → auto-branch on `require_review` to either `complete_task()` or `mark_review_ready()`.
+
+Registry: `registry.done(task_id, agent_id, *, quality_result=None, handoff=None) → dict`
+
+Returns:
+- `{"status": "completed", "task_id": ..., "quality_gate": "passed", "review": False}` — no review required
+- `{"status": "review_ready", "task_id": ..., "quality_gate": "passed", "review": True}` — review required
+- `{"status": "running", "task_id": ..., "quality_gate": "failed", "reason": ...}` — gate not passed
+
+CLI: `mac-agent done --task-id T --agent-id A [--quality-command CMD --quality-status passed|failed] [--changed-file FILE] [--risk RISK]`
+
+MCP: `mac_done(task_id, agent_id, quality_result?, changed_files?, risks?)`
+
+HTTP: `POST /tasks/{task_id}/done` with body `{agent_id, quality_result?, changed_files?, risks?}`
+
 ---
 
 ## 7. SQLite Ledger
@@ -389,10 +406,12 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (14)
+### Tools (15)
 
 | Tool | Parameters | Returns | Side Effect |
 |------|-----------|---------|-------------|
+| `mac_next_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | Markdown worker packet | write |
+| `mac_done` | `task_id`, `agent_id`, `quality_result?`, `changed_files?`, `risks?` | JSON `{status, task_id, quality_gate, review?, reason?}` | write |
 | `mac_submit_task` | `task: dict` (TaskTransfer) | JSON TaskTransfer | write |
 | `mac_claim_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | JSON TaskTransfer | write |
 | `mac_record_quality_and_complete` | `task_id`, `agent_id`, `result: dict` | JSON `{status, task_id, reason}` | write |
@@ -404,13 +423,16 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_mark_review_ready` | `task_id`, `agent_id`, `handoff?` | JSON TaskTransfer | write |
 | `mac_accept_review` | `task_id`, `reviewer_id` | JSON TaskTransfer | write |
 | `mac_reject_review` | `task_id`, `reviewer_id`, `reason?` | JSON TaskTransfer | write |
-| `mac_expire_stale_tasks` | *(none)* | JSON array of expired TaskTransfer | write |
-| `mac_next_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | Markdown worker packet | write |
+| `mac_expire_stale_tasks` | `auto_retry?` | JSON array of expired TaskTransfer | write |
 | `mac_expire_stale_agents` | `timeout_seconds?` | JSON array of expired AgentCard | write |
+
+`mac_next_task` is atomic: `claim_next_task` → `start_task` → `prepare_worker_packet` in one call. This is the primary entry point for AI agents to pick up work.
+
+`mac_done` is the primary entry point for finishing a task. It is atomic: `submit_quality_result` (if provided) → `evaluate_quality_gate` → then auto-branches on `CoordinationPolicy.require_review`: if `True`, calls `mark_review_ready` (saving handoff if provided); if `False`, calls `save_handoff_result` (if provided) → `complete_task`. Returns `status='completed'` (no review), `status='review_ready'` (review required), or `status='running'` (gate failed) with reason.
 
 `mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
 
-`mac_record_quality_and_complete` is atomic: `submit_quality_result` → `evaluate_quality_gate` → `complete_task` (only if gate passes). Returns `status='completed'` or `status='running'` with reason.
+`mac_record_quality_and_complete` is atomic: `submit_quality_result` → `evaluate_quality_gate` → `complete_task` (only if gate passes). Returns `status='completed'` or `status='running'` with reason. Prefer `mac_done` which also handles handoff and review lifecycle.
 
 `mac_worker_packet` includes the agent's `allowed_paths` and `forbidden_paths` when `agent_id` is provided.
 

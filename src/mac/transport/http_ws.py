@@ -77,6 +77,13 @@ class ReviewRejectRequest(BaseModel):
     reason: str = ""
 
 
+class DoneTaskRequest(BaseModel):
+    agent_id: str
+    quality_result: dict[str, Any] | None = None
+    changed_files: list[str] | None = None
+    risks: list[str] | None = None
+
+
 def create_app(registry: Registry) -> FastAPI:
     app = FastAPI(title="Multi-Agent Coordinator")
 
@@ -296,6 +303,29 @@ def create_app(registry: Registry) -> FastAPI:
         return _call_task(
             lambda: registry.reject_review(
                 task_id, reviewer_id=request.reviewer_id, reason=request.reason
+            )
+        )
+
+    @app.post("/tasks/{task_id}/done")
+    def done_task(task_id: str, request: DoneTaskRequest) -> dict[str, Any]:
+        """Finish a task in one step: quality + handoff + complete (or review-ready)."""
+        from mac.protocol.messages import HandoffResult, VerificationEntry
+
+        handoff = None
+        if request.changed_files or request.risks:
+            handoff = HandoffResult(
+                task_id=task_id,
+                agent_id=request.agent_id,
+                changed_files=request.changed_files or [],
+                risks=request.risks or [],
+                verification=[VerificationEntry(command="done", result="pass")],
+            )
+        return _call_task(
+            lambda: registry.done(
+                task_id,
+                request.agent_id,
+                quality_result=request.quality_result,
+                handoff=handoff,
             )
         )
 

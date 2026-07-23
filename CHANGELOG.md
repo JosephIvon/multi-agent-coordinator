@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-07-23
+
+### Added
+
+- **C-6**: `Registry.done()` single entry point for finishing a task: submit quality evidence → save handoff → complete (or mark review-ready, auto-branching on `require_review`)
+- **C-6**: `mac-agent done` CLI command (only `--task-id` and `--agent-id` required)
+- **C-6**: `mac_done` MCP tool (15 tools total; `mac_record_quality_and_complete` kept as legacy)
+- **C-6**: `POST /tasks/{task_id}/done` HTTP endpoint
+- Rewrote `docs/USER_GUIDE.md` with AI-tool-first approach: normal workflow is `mac_next_task` → `mac_done` (two steps, no state machine to remember)
+
+### Changed
+
+- SPEC.md updated to v2.5 (C-6 done feature, 15 MCP tools)
+- Test count: ~240 → ~251
+
 ## [0.6.0] — 2026-07-23
 
 ### Added

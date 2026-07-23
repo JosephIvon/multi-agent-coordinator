@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.6.0 | **License:** MIT
+**Version:** 0.7.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -31,9 +31,16 @@ pip install -e ".[dev]"
 ```bash
 mac-agent register --agent-id claude --name Claude --capability write_code
 mac-agent submit --task-id t1 --source-agent-id planner --type write_code --summary "Add auth handler"
-mac-agent claim --agent-id claude --capability write_code
-mac-agent start --task-id t1 --agent-id claude
-mac-agent complete --task-id t1 --agent-id claude
+
+# One command to claim + start + get work instructions
+mac-agent next --agent-id claude --capability write_code
+
+# ... agent does the work ...
+
+# One command to finish: quality evidence + handoff + complete
+mac-agent done --task-id t1 --agent-id claude \
+  --quality-command "pytest -q" --quality-status passed \
+  --changed-file src/auth.py --risk "manual browser test needed"
 ```
 
 ---
@@ -149,6 +156,7 @@ Core endpoints:
 | `GET` | `/tasks/{task_id}/review-packet` | Generate review packet |
 | `POST` | `/tasks/expire-stale` | Expire tasks past their TTL |
 | `POST` | `/agents/{agent_id}/next` | Claim + start + worker packet (atomic) |
+| `POST` | `/tasks/{task_id}/done` | Finish task: quality + handoff + complete (or review-ready) |
 | `POST` | `/agents/expire-stale` | Set offline agents with stale heartbeats |
 
 ---
@@ -194,13 +202,15 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (14)
+### Available Tools (15)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
+| `mac_next_task` | Claim + start + output worker packet (atomic) | write |
+| `mac_done` | Finish task in one step: quality + handoff + complete (or review-ready) | write |
 | `mac_submit_task` | Submit a task (full TaskTransfer dict) | write |
 | `mac_claim_task` | Claim + start a task (atomic) | write |
-| `mac_record_quality_and_complete` | Submit evidence + auto-complete on gate pass | write |
+| `mac_record_quality_and_complete` | Submit evidence + auto-complete on gate pass (legacy, prefer mac_done) | write |
 | `mac_fail_task` | Mark task as failed | write |
 | `mac_save_handoff` | Save structured handoff result | write |
 | `mac_list_ready_tasks` | List claimable tasks | read-only |
@@ -210,7 +220,6 @@ claude mcp add mac -- mac-mcp-server
 | `mac_accept_review` | Accept reviewed task → completed | write |
 | `mac_reject_review` | Reject reviewed task → rejected (auto-records conflict) | write |
 | `mac_expire_stale_tasks` | Expire non-terminal tasks past TTL → failed | write |
-| `mac_next_task` | Claim + start + output worker packet (atomic) | write |
 | `mac_expire_stale_agents` | Set offline agents with stale heartbeats | write |
 
 ### Available Resources (2)
@@ -294,6 +303,7 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 - Review packets include quality evidence summary; worker packets inline upstream handoff context.
 - Task TTL expiry: `expire_stale_tasks()` transitions stale tasks to `failed` with `TTL_EXPIRED`.
 - One-shot `mac-agent next` command: claim + start + output worker packet atomically.
+- One-shot `mac-agent done` command: quality + handoff + complete/review-ready atomically.
 - Auto-retry on TTL expiry: `expire_stale_tasks(auto_retry=True)` resets tasks with retries remaining.
 - Agent heartbeat expiry: `expire_stale_agents()` auto-offlines stale agents.
 - `mac-agent dashboard` command: one-command project overview.
@@ -325,7 +335,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (14 tools + 2 resources)
+  mcp_server.py      MCP Server (15 tools + 2 resources)
 ```
 
 ---

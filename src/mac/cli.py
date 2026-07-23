@@ -163,6 +163,17 @@ def _build_parser() -> argparse.ArgumentParser:
     complete.add_argument("--task-id", required=True)
     complete.add_argument("--agent-id", required=True)
 
+    done = subcommands.add_parser("done", help="Finish a task in one step: quality + handoff + complete (or review-ready)")
+    done.add_argument("--db", default="mac.db")
+    done.add_argument("--task-id", required=True)
+    done.add_argument("--agent-id", required=True)
+    done.add_argument("--quality-command", help="Quality check command (e.g. 'pytest -q')")
+    done.add_argument("--quality-status", choices=["passed", "failed"], help="Quality check result")
+    done.add_argument("--evidence", action="append", default=[], help="Quality evidence items")
+    done.add_argument("--changed-file", action="append", default=[], help="Files changed by this task")
+    done.add_argument("--risk", action="append", default=[], help="Residual risks")
+    done.add_argument("--verification", action="append", default=[], help="Verification entries (command:result:description)")
+
     fail = subcommands.add_parser("fail", help="Mark a task failed")
     fail.add_argument("--db", default="mac.db")
     fail.add_argument("--task-id", required=True)
@@ -546,6 +557,42 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         task = Registry(SQLiteStorage(Path(args.db))).complete_task(args.task_id, args.agent_id)
         _print_json(task.model_dump(mode="json"))
+        return 0
+
+    if args.command == "done":
+        from mac.protocol.messages import HandoffResult
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        registry = Registry(SQLiteStorage(Path(args.db)))
+
+        # Build quality_result if quality-command was provided.
+        quality_result = None
+        if args.quality_command:
+            quality_result = {
+                "command": args.quality_command,
+                "status": args.quality_status or "passed",
+                "evidence": args.evidence,
+            }
+
+        # Build handoff if any handoff fields were provided.
+        handoff = None
+        if args.changed_file or args.risk or args.verification:
+            handoff = HandoffResult(
+                task_id=args.task_id,
+                agent_id=args.agent_id,
+                verification=[_parse_verification(v) for v in args.verification],
+                changed_files=args.changed_file,
+                risks=args.risk,
+            )
+
+        result = registry.done(
+            args.task_id,
+            args.agent_id,
+            quality_result=quality_result,
+            handoff=handoff,
+        )
+        _print_json(result)
         return 0
 
     if args.command == "fail":

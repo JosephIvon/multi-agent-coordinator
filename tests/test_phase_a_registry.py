@@ -1046,3 +1046,162 @@ def test_expire_stale_agents_uses_policy_default_timeout(tmp_path):
     expired = registry.expire_stale_agents()  # uses policy default 60s
 
     assert len(expired) == 1
+
+
+# ------------------------------------------------------------------
+# done() — single entry point for finishing a task
+# ------------------------------------------------------------------
+
+
+def _make_running_task(registry: Registry, task_id: str = "t1", agent_id: str = "a1") -> TaskTransfer:
+    """Helper: submit + accept + start a task so it's in 'running' status."""
+    registry.register_agent(AgentCard(
+        agent_id=agent_id,
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    task = _task(task_id)
+    registry.submit_task(task)
+    registry.accept_handoff(task_id, agent_id)
+    return registry.start_task(task_id, agent_id)
+
+
+def test_done_completes_task_with_quality_no_review(tmp_path):
+    """done() with quality_result and no require_review → completed."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_task(registry)
+
+    result = registry.done(
+        "t1", "a1",
+        quality_result={"command": "pytest", "status": "passed"},
+    )
+
+    assert result["status"] == "completed"
+    assert result["task_id"] == "t1"
+    assert result["quality_gate"] == "passed"
+    assert result["review"] is False
+    assert registry.get_task("t1").status == "completed"
+
+
+def test_done_marks_review_ready_when_require_review(tmp_path):
+    """done() with require_review=True → review_ready."""
+    policy = CoordinationPolicy(require_review=True)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    _make_running_task(registry)
+
+    result = registry.done(
+        "t1", "a1",
+        quality_result={"command": "pytest", "status": "passed"},
+    )
+
+    assert result["status"] == "review_ready"
+    assert result["task_id"] == "t1"
+    assert result["quality_gate"] == "passed"
+    assert result["review"] is True
+    assert registry.get_task("t1").status == "review_ready"
+
+
+def test_done_with_handoff_no_review_completes_and_saves_handoff(tmp_path):
+    """done() with handoff + no review → completed, handoff saved."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_task(registry)
+
+    handoff = HandoffResult(
+        task_id="t1",
+        agent_id="a1",
+        changed_files=["src/main.py"],
+        risks=["manual test needed"],
+    )
+    result = registry.done(
+        "t1", "a1",
+        quality_result={"command": "pytest", "status": "passed"},
+        handoff=handoff,
+    )
+
+    assert result["status"] == "completed"
+    saved = registry.get_handoff_result("t1")
+    assert saved is not None
+    assert saved.changed_files == ["src/main.py"]
+    assert saved.risks == ["manual test needed"]
+
+
+def test_done_with_handoff_and_require_review_saves_handoff(tmp_path):
+    """done() with handoff + require_review → review_ready, handoff saved via mark_review_ready."""
+    policy = CoordinationPolicy(require_review=True)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    _make_running_task(registry)
+
+    handoff = HandoffResult(
+        task_id="t1",
+        agent_id="a1",
+        changed_files=["src/auth.py"],
+        risks=["browser test"],
+    )
+    result = registry.done(
+        "t1", "a1",
+        quality_result={"command": "pytest", "status": "passed"},
+        handoff=handoff,
+    )
+
+    assert result["status"] == "review_ready"
+    saved = registry.get_handoff_result("t1")
+    assert saved is not None
+    assert saved.changed_files == ["src/auth.py"]
+
+
+def test_done_without_quality_result_uses_pre_submitted(tmp_path):
+    """done() without quality_result uses previously submitted evidence."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_task(registry)
+
+    # Pre-submit quality evidence
+    registry.submit_quality_result("t1", {"command": "pytest", "status": "passed"})
+
+    result = registry.done("t1", "a1")
+
+    assert result["status"] == "completed"
+    assert result["quality_gate"] == "passed"
+
+
+def test_done_returns_running_when_quality_gate_fails(tmp_path):
+    """done() when quality gate fails → stays running, returns failure info."""
+    from mac.testing.contracts import TestContract
+
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="a1",
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    # Submit task with a strict test contract
+    task = TaskTransfer(
+        task_id="t1",
+        payload=TaskPayload(type="write_code", summary="test"),
+        test_contract=TestContract.for_risk("high"),
+    )
+    registry.submit_task(task)
+    registry.accept_handoff("t1", "a1")
+    registry.start_task("t1", "a1")
+
+    # Submit only partial evidence (missing required commands)
+    result = registry.done(
+        "t1", "a1",
+        quality_result={"command": "lint", "status": "passed"},
+    )
+
+    assert result["status"] == "running"
+    assert result["quality_gate"] == "failed"
+    assert "reason" in result
+    assert registry.get_task("t1").status == "running"
+
+
+def test_done_completes_without_test_contract(tmp_path):
+    """done() with no test_contract → gate passes automatically → completed."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_task(registry)
+
+    # No quality_result needed when there's no test contract
+    result = registry.done("t1", "a1")
+
+    assert result["status"] == "completed"
+    assert result["quality_gate"] == "passed"

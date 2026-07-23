@@ -217,3 +217,40 @@ def test_http_next_claims_starts_and_returns_worker_packet(tmp_path):
     # Task should now be running
     task_resp = client.get("/tasks/task-next")
     assert task_resp.json()["status"] == "running"
+
+
+def test_http_done_completes_task_with_quality_and_handoff(tmp_path):
+    """POST /tasks/{id}/done completes a task with quality + handoff in one step."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    client = TestClient(create_app(registry))
+
+    agent = AgentCard(agent_id="worker", name="Worker", capabilities=[AgentCapability(name="write_code")])
+    client.post("/agents/register", json=agent.model_dump(mode="json"))
+    task = TaskTransfer(
+        task_id="task-done",
+        payload=TaskPayload(type="write_code", summary="Done endpoint test"),
+    )
+    client.post("/tasks", json=task.model_dump(mode="json"))
+    client.post("/tasks/task-done/accept", json={"agent_id": "worker"})
+    client.post("/tasks/task-done/start", json={"agent_id": "worker"})
+
+    response = client.post(
+        "/tasks/task-done/done",
+        json={
+            "agent_id": "worker",
+            "quality_result": {"command": "pytest", "status": "passed"},
+            "changed_files": ["src/main.py"],
+            "risks": ["manual test"],
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["task_id"] == "task-done"
+    assert data["quality_gate"] == "passed"
+    assert data["review"] is False
+
+    # Verify handoff was saved
+    handoff = client.get("/tasks/task-done/handoff")
+    assert handoff.status_code == 200
+    assert handoff.json()["changed_files"] == ["src/main.py"]
