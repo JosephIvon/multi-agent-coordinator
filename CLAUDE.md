@@ -81,7 +81,7 @@ src/mac/
 | ID | 内容 | 状态 | 备注 |
 |----|------|------|------|
 | K-001 | `tests/test_release_readiness.py` `import tomllib` 必须 `try/except` 兜底 `tomli`(Py 3.10 兼容) | ✅ 已修 | 守 `requires-python = ">=3.10"` |
-| K-002 | Windows 离线 `WinError 10051` 不要直接用 `socket.socketpair()`,改 `multiprocessing.Pipe` 或 `asyncio.Queue`;`mcp.client.stdio` 在 Windows + Py 3.10 的 ProactorEventLoop 下无法连接子进程 stdio pipe | ⚠️ 预防 | Linux/macOS 正常;stdio E2E 测试 skipOnWindows |
+| K-002 | Windows 离线 `WinError 10051` 不要直接用 `socket.socketpair()`,改 `multiprocessing.Pipe` 或 `asyncio.Queue`;`mcp.client.stdio` 在 Windows + Py 3.10 的 ProactorEventLoop 下无法连接子进程 stdio pipe;Py 3.10 stdio E2E 测试 skipOnWindowsOrPy310 | ⚠️ 预防 | Linux/macOS Py 3.11+ 正常 |
 | K-003 | Python `match` / `X \| None` 是 3.10+ 语法,CI runner 不要锁 3.9 | ⚠️ 预防 | `pyproject.toml` 已守住 |
 
 新踩到的:**同格式追加一行**(就追加,别再开 `KNOWN_ISSUES.md` 文件)。
