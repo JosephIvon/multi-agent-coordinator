@@ -147,6 +147,8 @@ Core endpoints:
 | `POST` | `/conflicts/{conflict_id}/resolve` | Resolve conflict |
 | `GET` | `/tasks/{task_id}/worker-packet` | Generate worker packet |
 | `GET` | `/tasks/{task_id}/review-packet` | Generate review packet |
+| `POST` | `/tasks/expire-stale` | Expire tasks past their TTL |
+| `POST` | `/agents/{agent_id}/next` | Claim + start + worker packet (atomic) |
 
 ---
 
@@ -191,7 +193,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (11)
+### Available Tools (13)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -206,6 +208,8 @@ claude mcp add mac -- mac-mcp-server
 | `mac_mark_review_ready` | Move task to review_ready (requires `require_review=True`) | write |
 | `mac_accept_review` | Accept reviewed task → completed | write |
 | `mac_reject_review` | Reject reviewed task → rejected (auto-records conflict) | write |
+| `mac_expire_stale_tasks` | Expire non-terminal tasks past TTL → failed | write |
+| `mac_next_task` | Claim + start + output worker packet (atomic) | write |
 
 ### Available Resources (2)
 
@@ -314,7 +318,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (11 tools + 2 resources)
+  mcp_server.py      MCP Server (13 tools + 2 resources)
 ```
 
 ---

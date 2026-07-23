@@ -67,7 +67,7 @@ def _safe_call(func: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools (11)
+# Tools (13)
 # ---------------------------------------------------------------------------
 
 
@@ -316,6 +316,57 @@ def mac_reject_review(task_id: str, reviewer_id: str, reason: str = "") -> str:
 
     def _do() -> Any:
         return _registry().reject_review(task_id, reviewer_id=reviewer_id, reason=reason)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_expire_stale_tasks() -> str:
+    """Expire non-terminal tasks past their TTL.
+
+    Scans for tasks in proposed, accepted, running, or review_ready status
+    whose TTL has elapsed and transitions them to ``failed`` with
+    ``error_code="TTL_EXPIRED"``.
+
+    :returns: JSON array of expired TaskTransfer objects.
+    """
+
+    def _do() -> Any:
+        return _registry().expire_stale_tasks()
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_next_task(
+    agent_id: str,
+    capability: str,
+    project_context: str | None = None,
+    best_effort: bool = False,
+) -> str:
+    """Atomically claim, start, and generate a worker packet for the next ready task.
+
+    One-shot convenience: claim_next_task → start_task → prepare_worker_packet.
+
+    :param agent_id: ID of the claiming agent.
+    :param capability: Required capability to match.
+    :param project_context: Optional project filter.
+    :param best_effort: If True, consider tasks with other capabilities.
+    :returns: Markdown worker packet string, or not_found if no task available.
+    """
+
+    def _do() -> Any:
+        reg = _registry()
+        claimed = reg.claim_next_task(
+            agent_id=agent_id,
+            capability=capability,
+            project_context=project_context,
+            best_effort=best_effort,
+        )
+        if claimed is None:
+            return None
+        started = reg.start_task(claimed.task_id, agent_id)
+        return reg.prepare_worker_packet(started.task_id, agent_id=agent_id)
 
     return _safe_call(_do)
 

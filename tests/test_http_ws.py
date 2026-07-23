@@ -162,3 +162,58 @@ def test_http_metrics_returns_aggregate_indicators(tmp_path):
     metrics_after = client.get("/metrics").json()
     assert metrics_after["samples"]["task_transfers"] == 1
     assert metrics_after["active_agents"] == 1
+
+
+def test_http_expire_stale_transitions_stuck_tasks(tmp_path):
+    from mac.protocol.messages import CoordinationPolicy
+    policy = CoordinationPolicy(require_review=True)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    client = TestClient(create_app(registry))
+
+    # Register agent, submit + claim + start a task
+    agent = AgentCard(agent_id="worker", name="Worker", capabilities=[AgentCapability(name="write_code")])
+    client.post("/agents/register", json=agent.model_dump(mode="json"))
+    task = TaskTransfer(
+        task_id="stuck-task",
+        payload=TaskPayload(type="write_code", summary="Stuck task"),
+        ttl_seconds=1,
+    )
+    client.post("/tasks", json=task.model_dump(mode="json"))
+    client.post(f"/agents/worker/claim", json={"capability": "write_code"})
+    client.post(f"/tasks/stuck-task/start", json={"agent_id": "worker"})
+
+    import time
+    time.sleep(2)
+
+    # Expire stale tasks
+    response = client.post("/tasks/expire-stale")
+    assert response.status_code == 200
+    expired = response.json()
+    assert any(t["task_id"] == "stuck-task" for t in expired)
+    stuck = next(t for t in expired if t["task_id"] == "stuck-task")
+    assert stuck["status"] == "failed"
+    assert stuck["error_code"] == "TTL_EXPIRED"
+
+
+def test_http_next_claims_starts_and_returns_worker_packet(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    client = TestClient(create_app(registry))
+
+    agent = AgentCard(agent_id="worker", name="Worker", capabilities=[AgentCapability(name="write_code")])
+    client.post("/agents/register", json=agent.model_dump(mode="json"))
+    task = TaskTransfer(
+        task_id="task-next",
+        payload=TaskPayload(type="write_code", summary="Next command test"),
+    )
+    client.post("/tasks", json=task.model_dump(mode="json"))
+
+    response = client.post("/agents/worker/next", json={"capability": "write_code"})
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "text/markdown; charset=utf-8"
+    body = response.text
+    assert "task-next" in body
+    assert "write_code" in body
+
+    # Task should now be running
+    task_resp = client.get("/tasks/task-next")
+    assert task_resp.json()["status"] == "running"

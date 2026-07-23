@@ -355,7 +355,7 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (11)
+### Tools (13)
 
 | Tool | Parameters | Returns | Side Effect |
 |------|-----------|---------|-------------|
@@ -370,6 +370,8 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_mark_review_ready` | `task_id`, `agent_id`, `handoff?` | JSON TaskTransfer | write |
 | `mac_accept_review` | `task_id`, `reviewer_id` | JSON TaskTransfer | write |
 | `mac_reject_review` | `task_id`, `reviewer_id`, `reason?` | JSON TaskTransfer | write |
+| `mac_expire_stale_tasks` | *(none)* | JSON array of expired TaskTransfer | write |
+| `mac_next_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | Markdown worker packet | write |
 
 `mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
 

@@ -299,6 +299,26 @@ def create_app(registry: Registry) -> FastAPI:
             )
         )
 
+    @app.post("/tasks/expire-stale")
+    def expire_stale_tasks() -> list[TaskTransfer]:
+        """Transition non-terminal tasks past their TTL to failed."""
+        return registry.expire_stale_tasks()
+
+    @app.post("/agents/{agent_id}/next")
+    def next_task(agent_id: str, request: ClaimTaskRequest) -> Response:
+        """Atomically claim, start, and return a worker packet for the next ready task."""
+        claimed = registry.claim_next_task(
+            agent_id=agent_id,
+            capability=request.capability,
+            project_context=request.project_context,
+            best_effort=request.best_effort,
+        )
+        if claimed is None:
+            raise HTTPException(status_code=404, detail="No claimable task found")
+        _call_task(lambda: registry.start_task(claimed.task_id, agent_id))
+        packet = registry.prepare_worker_packet(claimed.task_id, agent_id=agent_id)
+        return Response(content=packet, media_type="text/markdown")
+
     @app.get("/ledger/{trace_id}")
     def get_ledger(trace_id: str) -> list[Any]:
         return registry.get_audit_trail(trace_id)
