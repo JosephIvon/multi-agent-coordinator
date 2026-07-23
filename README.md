@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.3.0 | **License:** MIT
+**Version:** 0.4.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 

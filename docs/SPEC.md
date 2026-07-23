@@ -1,7 +1,7 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.1
-> Date: 2026-07-22
+> Version: 2.2
+> Date: 2026-07-23
 > Status: implemented for local Phase A collaboration
 
 ---
