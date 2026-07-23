@@ -8,11 +8,16 @@ version = "0.4.0"
 description = "A lightweight multi-agent coordination ledger for task handoff, context handoff, and quality gates."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  {name = "Wenbo Fan", email = "fanwenbo_best@126.com"},
+]
 keywords = ["ai-agents", "coordination", "task-ledger", "handoff", "testing"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
   "Programming Language :: Python :: 3.10",
@@ -20,9 +25,17 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
 ]
+
 dependencies = [
   "pydantic>=2.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/JosephIvon/multi-agent-coordinator"
+Documentation = "https://github.com/JosephIvon/multi-agent-coordinator/tree/main/docs"
+Repository = "https://github.com/JosephIvon/multi-agent-coordinator"
+Changelog = "https://github.com/JosephIvon/multi-agent-coordinator/releases"
+Issues = "https://github.com/JosephIvon/multi-agent-coordinator/issues"
 
 [project.optional-dependencies]
 http = [
