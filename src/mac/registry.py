@@ -209,6 +209,36 @@ class Registry:
         self._publish(task, "task_failed", actor=agent_id, to_status="failed", payload={"error_code": error_code})
         return task
 
+    def expire_stale_tasks(self, *, now: float | None = None) -> list[TaskTransfer]:
+        """Transition non-terminal tasks past their TTL to ``failed``.
+
+        Scans tasks in ``running`` / ``review_ready`` / ``accepted`` states
+        whose ``updated_at`` (or ``created_at`` fallback) + ``ttl_seconds``
+        precedes ``now``. Each is failed with ``error_code='TTL_EXPIRED'``.
+
+        MAC does not run a background thread; callers (CLI, cron) invoke this
+        periodically. Returns the list of expired tasks.
+        """
+        checkpoint = now if now is not None else time.time()
+        candidates: list[TaskTransfer] = []
+        for status in ("running", "review_ready", "accepted"):
+            candidates.extend(self.ledger.list_task_transfers(status=status))
+        expired: list[TaskTransfer] = []
+        for task in candidates:
+            timestamp_str = task.updated_at or task.created_at
+            updated = _parse_iso_to_epoch(timestamp_str)
+            if updated is None:
+                continue
+            if (checkpoint - updated) > task.ttl_seconds:
+                failed = self.fail_task(
+                    task.task_id,
+                    agent_id="system",
+                    error_code="TTL_EXPIRED",
+                    message=f"Task exceeded TTL of {task.ttl_seconds}s in state {task.status!r}.",
+                )
+                expired.append(failed)
+        return expired
+
     def record_checkpoint(self, task_id: str, *, agent_id: str, checkpoint: dict[str, Any]) -> TaskTransfer:
         task = self._get_task(task_id)
         if task.status in {"completed", "cancelled"}:
@@ -299,6 +329,27 @@ class Registry:
             raise QualityGateError(reason or "quality_gate_failed")
         return self._transition(task_id, "completed", expected_status="running", agent_id=agent_id, action="complete_task")
 
+    # ------------------------------------------------------------------
+    # Reviewer capability guard (B-5)
+    # ------------------------------------------------------------------
+
+    def _assert_reviewer_capability(self, reviewer_id: str) -> None:
+        """Raise ``StateConflictError`` if the reviewer lacks the required capability.
+
+        No-op when ``policy.reviewer_capability`` is not configured.
+        """
+        cap_name = self.policy.reviewer_capability
+        if not cap_name:
+            return
+        agent = self.ledger.get_agent_card(reviewer_id)
+        if agent is None or not any(
+            c.name == cap_name for c in agent.capabilities
+        ):
+            raise StateConflictError(
+                f"Agent {reviewer_id!r} lacks capability "
+                f"{cap_name!r} required for review."
+            )
+
     def mark_review_ready(
         self,
         task_id: str,
@@ -329,6 +380,7 @@ class Registry:
 
     def accept_review(self, task_id: str, reviewer_id: str) -> TaskTransfer:
         """Accept a ``review_ready`` task, transitioning to ``completed``."""
+        self._assert_reviewer_capability(reviewer_id)
         task = self._get_task(task_id)
         if task.status != "review_ready":
             raise StateConflictError(
@@ -349,6 +401,7 @@ class Registry:
 
         The rejection reason is automatically recorded as a conflict.
         """
+        self._assert_reviewer_capability(reviewer_id)
         task = self._get_task(task_id)
         if task.status != "review_ready":
             raise StateConflictError(
@@ -500,6 +553,19 @@ class Registry:
             )
         lines.extend(["", "## Depends On"])
         lines.extend(dependencies or ["- None"])
+        # Inline upstream handoff summaries for completed dependencies.
+        for dep_id in task.depends_on:
+            dep = self.ledger.get_task_transfer(dep_id)
+            if dep is not None and dep.status == "completed":
+                dep_handoff = self.get_handoff_result(dep_id)
+                if dep_handoff is not None:
+                    lines.extend([
+                        "",
+                        f"### Upstream Handoff: {dep_id}",
+                        f"- Agent: {dep_handoff.agent_id}",
+                        f"- Changed files: {_format_list(dep_handoff.changed_files)}",
+                        f"- Risks: {_format_list(dep_handoff.risks)}",
+                    ])
         lines.extend(
             [
                 "",
@@ -552,6 +618,16 @@ class Registry:
                 [f"- `{entry.command}`: {entry.result} {entry.description}".rstrip() for entry in handoff.verification]
                 or ["- None"]
             )
+        quality_results = self.ledger.get_quality_results(task_id)
+        if quality_results:
+            lines.extend(["", "## Quality Evidence"])
+            for qr in quality_results:
+                status = qr.get("status", "unknown")
+                command = qr.get("command", "unknown")
+                evidence = qr.get("evidence", [])
+                lines.append(f"- `{command}`: {status}")
+                if evidence:
+                    lines.append(f"  evidence: {', '.join(str(e) for e in evidence)}")
         lines.extend(["", "## Open Conflicts"])
         lines.extend([f"- {conflict.conflict_id}: {conflict.description}" for conflict in task_conflicts] or ["- None"])
         return "\n".join(lines).strip() + "\n"
@@ -1016,3 +1092,14 @@ def _now_id() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_to_epoch(timestamp: str) -> float | None:
+    """Convert an ISO-8601 timestamp to a UNIX epoch float. None on parse error."""
+    try:
+        dt = datetime.fromisoformat(timestamp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (TypeError, ValueError):
+        return None

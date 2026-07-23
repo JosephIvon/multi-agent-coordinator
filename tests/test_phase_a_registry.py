@@ -470,6 +470,119 @@ def test_apply_path_guardrails_resets_block_to_pass_when_no_violations_remain(tm
 
 
 # ---------------------------------------------------------------------------
+# B-1/B-2: Packet enhancement tests
+# ---------------------------------------------------------------------------
+
+
+def test_review_packet_includes_quality_evidence(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("task-1", status="running"))
+    registry.submit_quality_result(
+        "task-1",
+        {
+            "agent_id": "worker",
+            "command": "python -m pytest --cov",
+            "status": "passed",
+            "evidence": ["coverage_report", "test_output"],
+        },
+    )
+    registry.save_handoff_result(
+        HandoffResult(task_id="task-1", agent_id="worker", verification=[VerificationEntry(command="pytest", result="pass")])
+    )
+
+    packet = registry.prepare_review_packet("task-1")
+
+    assert "## Quality Evidence" in packet
+    assert "python -m pytest --cov" in packet
+    assert "passed" in packet
+    assert "coverage_report" in packet
+
+
+def test_worker_packet_inlines_upstream_handoff_for_completed_dependency(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("upstream", status="completed"))
+    registry.save_handoff_result(
+        HandoffResult(
+            task_id="upstream",
+            agent_id="worker",
+            changed_files=["src/feature.py", "src/helper.py"],
+            risks=["No None-check on input"],
+        )
+    )
+    registry.submit_task(_task("downstream", depends_on=["upstream"]))
+
+    packet = registry.prepare_worker_packet("downstream")
+
+    assert "### Upstream Handoff: upstream" in packet
+    assert "src/feature.py" in packet
+    assert "No None-check on input" in packet
+
+
+# ---------------------------------------------------------------------------
+# B-3: Task TTL/lease expiry tests
+# ---------------------------------------------------------------------------
+
+
+def test_expire_stale_tasks_fails_running_task_past_ttl(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _task("stale", status="running", ttl_seconds=100)
+    registry.submit_task(task)
+    # Manually backdate updated_at to simulate passage of time.
+    t = registry.get_task("stale")
+    from datetime import datetime, timezone, timedelta
+    old_time = (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat()
+    t.updated_at = old_time
+    registry.ledger.save_task_transfer(t)
+
+    expired = registry.expire_stale_tasks()
+
+    assert len(expired) == 1
+    assert expired[0].task_id == "stale"
+    assert expired[0].status == "failed"
+    assert expired[0].error_code == "TTL_EXPIRED"
+
+
+def test_expire_stale_tasks_skips_task_within_ttl(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("fresh", status="running", ttl_seconds=3600))
+
+    expired = registry.expire_stale_tasks()
+
+    assert expired == []
+    assert registry.get_task("fresh").status == "running"
+
+
+def test_expire_stale_tasks_handles_review_ready_tasks(tmp_path):
+    registry = Registry(
+        SQLiteTaskLedger(tmp_path / "mac.db"),
+        policy=CoordinationPolicy(require_review=True),
+    )
+    task = _task("stuck-review", status="running", ttl_seconds=60)
+    registry.submit_task(task)
+    registry.mark_review_ready("stuck-review", agent_id="worker")
+    # Backdate
+    t = registry.get_task("stuck-review")
+    from datetime import datetime, timezone, timedelta
+    t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    registry.ledger.save_task_transfer(t)
+
+    expired = registry.expire_stale_tasks()
+
+    assert len(expired) == 1
+    assert expired[0].error_code == "TTL_EXPIRED"
+
+
+def test_expire_stale_tasks_ignores_completed_and_cancelled(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task("done", status="completed", ttl_seconds=1))
+    registry.submit_task(_task("gone", status="cancelled", ttl_seconds=1))
+
+    expired = registry.expire_stale_tasks()
+
+    assert expired == []
+
+
+# ---------------------------------------------------------------------------
 # P5-2: Review lifecycle tests — mark_review_ready, accept_review, reject_review
 # ---------------------------------------------------------------------------
 
@@ -690,3 +803,97 @@ def test_full_review_lifecycle_with_events(tmp_path):
     event_types = [event.type for event in events]
     assert "task_review_ready" in event_types
     assert "task_review_accepted" in event_types
+
+
+# ---------------------------------------------------------------------------
+# B-5: Reviewer capability validation
+# ---------------------------------------------------------------------------
+
+
+def _capability_registry(tmp_path, *, capability: str = "review_code", events: list | None = None) -> Registry:
+    """Create a Registry with require_review=True and reviewer_capability set."""
+    bus = TaskEventBus()
+    if events is not None:
+        bus.subscribe(events.append)
+    policy = CoordinationPolicy(require_review=True, reviewer_capability=capability)
+    return Registry(SQLiteTaskLedger(tmp_path / "mac.db"), event_bus=bus, policy=policy)
+
+
+def _review_ready_task(registry: Registry, task_id: str = "task-rv") -> None:
+    """Submit → claim → start → mark_review_ready a task."""
+    registry.submit_task(_task(task_id))
+    claimed = registry.claim_next_task(agent_id="worker", capability="write_code")
+    assert claimed is not None
+    registry.start_task(task_id, agent_id="worker")
+    registry.mark_review_ready(task_id, agent_id="worker")
+
+
+def test_accept_review_blocked_when_reviewer_lacks_capability(tmp_path):
+    reg = _capability_registry(tmp_path)
+    reg.register_agent(AgentCard(
+        agent_id="reviewer-bad",
+        name="Bad Reviewer",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    _review_ready_task(reg)
+
+    with pytest.raises(StateConflictError, match="lacks capability"):
+        reg.accept_review("task-rv", reviewer_id="reviewer-bad")
+
+
+def test_accept_review_allowed_when_reviewer_has_capability(tmp_path):
+    reg = _capability_registry(tmp_path)
+    reg.register_agent(AgentCard(
+        agent_id="reviewer-good",
+        name="Good Reviewer",
+        capabilities=[AgentCapability(name="review_code")],
+    ))
+    _review_ready_task(reg)
+
+    result = reg.accept_review("task-rv", reviewer_id="reviewer-good")
+    assert result.status == "completed"
+
+
+def test_reject_review_blocked_when_reviewer_lacks_capability(tmp_path):
+    reg = _capability_registry(tmp_path)
+    reg.register_agent(AgentCard(
+        agent_id="reviewer-bad",
+        name="Bad Reviewer",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    _review_ready_task(reg)
+
+    with pytest.raises(StateConflictError, match="lacks capability"):
+        reg.reject_review("task-rv", reviewer_id="reviewer-bad", reason="not good")
+
+
+def test_reject_review_allowed_when_reviewer_has_capability(tmp_path):
+    reg = _capability_registry(tmp_path)
+    reg.register_agent(AgentCard(
+        agent_id="reviewer-good",
+        name="Good Reviewer",
+        capabilities=[AgentCapability(name="review_code")],
+    ))
+    _review_ready_task(reg)
+
+    result = reg.reject_review("task-rv", reviewer_id="reviewer-good", reason="needs rework")
+    assert result.status == "rejected"
+
+
+def test_accept_review_blocked_when_reviewer_not_registered(tmp_path):
+    reg = _capability_registry(tmp_path)
+    _review_ready_task(reg)
+
+    with pytest.raises(StateConflictError, match="lacks capability"):
+        reg.accept_review("task-rv", reviewer_id="ghost-reviewer")
+
+
+def test_review_capability_noop_when_not_configured(tmp_path):
+    """When reviewer_capability is None (default), any reviewer is accepted."""
+    policy = CoordinationPolicy(require_review=True)
+    reg = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    _review_ready_task(reg)
+
+    # No agent registered, but no capability requirement → should succeed
+    result = reg.accept_review("task-rv", reviewer_id="anyone")
+    assert result.status == "completed"

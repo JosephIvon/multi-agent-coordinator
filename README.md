@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.4.0 | **License:** MIT
+**Version:** 0.5.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -265,6 +265,7 @@ registry = Registry(SQLiteTaskLedger("mac.db"))
 | `MAC_REQUIRE_PATH_CHECK` | Truthy → enforce path guardrails on handoff |
 | `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
 | `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
+| `MAC_REVIEWER_CAPABILITY` | Capability name required for review actions |
 
 When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use `mark_review_ready()` → `accept_review()`/`reject_review()` instead.
 
@@ -282,6 +283,10 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 - Generate worker and review Markdown packets for human-mediated agent handoff.
 - Enforce risk-based quality evidence before completing tasks with a `TestContract`.
 - Optional review lifecycle: `mark_review_ready` → `accept_review`/`reject_review` (controlled by `CoordinationPolicy.require_review`).
+- Reviewer capability validation: `accept_review`/`reject_review` enforce `CoordinationPolicy.reviewer_capability`.
+- Review packets include quality evidence summary; worker packets inline upstream handoff context.
+- Task TTL expiry: `expire_stale_tasks()` transitions stale tasks to `failed` with `TTL_EXPIRED`.
+- One-shot `mac-agent next` command: claim + start + output worker packet atomically.
 - Expose 6 aggregate metrics for observability (cycle time, handoff/quality pass rates, retry/conflict rates, active agents).
 
 ## What It Cannot Do Yet
@@ -309,7 +314,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (8 tools + 2 resources)
+  mcp_server.py      MCP Server (11 tools + 2 resources)
 ```
 
 ---

@@ -104,6 +104,7 @@ class CoordinationPolicy(BaseModel):
 
     require_review: bool = False
     require_path_check: bool = False
+    reviewer_capability: str | None = None
     path_rule: PathRule = Field(default_factory=PathRule)
     max_retry_count: int = Field(default=3, ge=0)
 
@@ -116,6 +117,7 @@ class CoordinationPolicy(BaseModel):
         - ``MAC_REQUIRE_REVIEW`` / ``MAC_REQUIRE_PATH_CHECK`` — truthy values
           (``1``, ``true``, ``yes``, ``on``) enable the corresponding feature.
         - ``MAC_MAX_RETRY_COUNT`` — non-negative integer override for retry cap.
+        - ``MAC_REVIEWER_CAPABILITY`` — capability name required for review actions.
         - ``MAC_PATH_RULES`` — two halves separated by ``|`` (allowed|forbidden),
           each half a comma-separated glob list. Whitespace around segments
           is stripped; empty halves default to their Pydantic defaults.
@@ -155,6 +157,7 @@ class CoordinationPolicy(BaseModel):
         return cls(
             require_review=_truthy("MAC_REQUIRE_REVIEW"),
             require_path_check=_truthy("MAC_REQUIRE_PATH_CHECK"),
+            reviewer_capability=source.get("MAC_REVIEWER_CAPABILITY") or None,
             max_retry_count=_int("MAC_MAX_RETRY_COUNT", cls.model_fields["max_retry_count"].default),
             path_rule=path_rule,
         )

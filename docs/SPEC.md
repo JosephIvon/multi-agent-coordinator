@@ -1,8 +1,8 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.2
+> Version: 2.3
 > Date: 2026-07-23
-> Status: implemented for local Phase A collaboration
+> Status: implemented for Phase B collaboration
 
 ---
 
@@ -196,6 +196,7 @@ If no allowed or forbidden patterns exist, no checking is performed. If any patt
 class CoordinationPolicy(BaseModel):
     require_review: bool = False
     require_path_check: bool = False
+    reviewer_capability: str | None = None
     path_rule: PathRule = Field(default_factory=PathRule)
     max_retry_count: int = Field(default=3, ge=0)
 ```
@@ -208,6 +209,7 @@ Environment variable mapping (`from_env()`):
 | `MAC_REQUIRE_PATH_CHECK` | Truthy → `require_path_check=True` |
 | `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
 | `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
+| `MAC_REVIEWER_CAPABILITY` | Capability name required for `accept_review`/`reject_review` |
 
 ---
 
@@ -224,10 +226,74 @@ Main operations:
 - Handoff: `save_handoff_result()`, `get_handoff_result()`
 - Conflict: `record_conflict()`, `list_conflicts()`, `resolve_conflict()`
 - Packet: `prepare_worker_packet()`, `prepare_review_packet()`
+- Expiry: `expire_stale_tasks()`
 - Audit: `get_audit_trail(trace_id)`
 - Metrics: `get_metrics()`
 
 CLI and HTTP adapters are thin wrappers around this API.
+
+---
+
+## 6.1 Phase B Features
+
+### B-1: Review Packet Quality Evidence
+
+`prepare_review_packet()` now includes a **Quality Evidence** section listing all quality results for the task:
+
+```text
+## Quality Evidence
+- `pytest -q`: passed
+  evidence: 12 passed, 2 skipped
+- `ruff check`: passed
+```
+
+This gives reviewers a quick summary of what quality checks passed/failed without needing a separate API call.
+
+### B-2: Worker Packet Upstream Handoff
+
+`prepare_worker_packet()` now inlines upstream handoff summaries for completed dependencies:
+
+```text
+### Upstream Handoff: task-1
+- Agent: coder
+- Changed files: src/auth.py, src/models.py
+- Risks: manual browser check still pending
+```
+
+Workers see what upstream agents changed and flagged as risky, enabling informed downstream work.
+
+### B-3: Task TTL / Lease Expiry
+
+`expire_stale_tasks()` scans non-terminal tasks (`running`, `review_ready`, `accepted`) whose `created_at + ttl_seconds` has passed and transitions them to `failed` with `error_code="TTL_EXPIRED"`:
+
+```python
+expired = registry.expire_stale_tasks()  # returns list of expired TaskTransfer
+```
+
+CLI: `mac-agent expire-stale --db mac.db`
+
+### B-4: `mac-agent next` One-Shot Command
+
+`mac-agent next` atomically claims, starts, and outputs a worker packet for the next ready task:
+
+```bash
+mac-agent next --agent-id coder --capability write_code --db mac.db
+```
+
+Output starts with `---MAC-TASK:` JSON header (machine-parseable) followed by the Markdown worker packet (human-readable).
+
+### B-5: Reviewer Capability Validation
+
+When `CoordinationPolicy.reviewer_capability` is set, `accept_review()` and `reject_review()` verify that the reviewer agent is registered and has a matching capability:
+
+```python
+policy = CoordinationPolicy(require_review=True, reviewer_capability="review_code")
+registry = Registry(ledger, policy=policy)
+# accept_review / reject_review will raise StateConflictError if the
+# reviewer lacks the "review_code" capability
+```
+
+Environment variable: `MAC_REVIEWER_CAPABILITY=review_code`.
 
 ---
 

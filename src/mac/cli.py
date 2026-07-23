@@ -199,6 +199,17 @@ def _build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--db", default="mac.db")
     audit.add_argument("--trace-id", required=True)
 
+    expire = subcommands.add_parser("expire-stale", help="Expire tasks past their TTL")
+    expire.add_argument("--db", default="mac.db")
+
+    next_cmd = subcommands.add_parser(
+        "next", help="Claim + start the next ready task and print its worker packet"
+    )
+    next_cmd.add_argument("--db", default="mac.db")
+    next_cmd.add_argument("--agent-id", required=True)
+    next_cmd.add_argument("--capability", required=True)
+    next_cmd.add_argument("--best-effort", action="store_true")
+
     observe = subcommands.add_parser("observe", help="Record an observed agent outcome")
     observe.add_argument("--db", default="mac.db")
     observe.add_argument("--agent-id", required=True)
@@ -607,6 +618,38 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         entries = Registry(SQLiteStorage(Path(args.db))).get_audit_trail(args.trace_id)
         _print_json([entry.model_dump(mode="json") for entry in entries])
+        return 0
+
+    if args.command == "expire-stale":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        expired = Registry(SQLiteStorage(Path(args.db))).expire_stale_tasks()
+        if expired:
+            for task in expired:
+                print(f"Expired: {task.task_id} (TTL_EXPIRED)")
+        else:
+            print("No stale tasks found.")
+        return 0
+
+    if args.command == "next":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        claimed = registry.claim_next_task(
+            agent_id=args.agent_id,
+            capability=args.capability,
+            best_effort=args.best_effort,
+        )
+        if claimed is None:
+            print("No claimable tasks found.", file=sys.stderr)
+            return 1
+        started = registry.start_task(claimed.task_id, args.agent_id)
+        packet = registry.prepare_worker_packet(claimed.task_id, agent_id=args.agent_id)
+        header = json.dumps({"task_id": started.task_id, "status": started.status})
+        print(f"---MAC-TASK: {header}---")
+        print(packet, end="")
         return 0
 
     if args.command == "observe":
