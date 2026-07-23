@@ -107,6 +107,7 @@ class CoordinationPolicy(BaseModel):
     reviewer_capability: str | None = None
     path_rule: PathRule = Field(default_factory=PathRule)
     max_retry_count: int = Field(default=3, ge=0)
+    agent_timeout: int = Field(default=300, ge=0, description="Seconds before an online agent is considered stale")
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> CoordinationPolicy:
@@ -118,6 +119,7 @@ class CoordinationPolicy(BaseModel):
           (``1``, ``true``, ``yes``, ``on``) enable the corresponding feature.
         - ``MAC_MAX_RETRY_COUNT`` — non-negative integer override for retry cap.
         - ``MAC_REVIEWER_CAPABILITY`` — capability name required for review actions.
+        - ``MAC_AGENT_TIMEOUT`` — non-negative integer seconds before an online agent is considered stale.
         - ``MAC_PATH_RULES`` — two halves separated by ``|`` (allowed|forbidden),
           each half a comma-separated glob list. Whitespace around segments
           is stripped; empty halves default to their Pydantic defaults.
@@ -159,6 +161,7 @@ class CoordinationPolicy(BaseModel):
             require_path_check=_truthy("MAC_REQUIRE_PATH_CHECK"),
             reviewer_capability=source.get("MAC_REVIEWER_CAPABILITY") or None,
             max_retry_count=_int("MAC_MAX_RETRY_COUNT", cls.model_fields["max_retry_count"].default),
+            agent_timeout=_int("MAC_AGENT_TIMEOUT", cls.model_fields["agent_timeout"].default),
             path_rule=path_rule,
         )
 

@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] — 2026-07-23
+
+### Added
+
+- **C-1**: GitHub Actions publish workflow (tag-triggered PyPI upload via trusted publishing)
+- **C-2**: `expire_stale_tasks(auto_retry=True)` resets tasks with retries remaining to `proposed` instead of `failed`
+- **C-2**: `mac-agent expire-stale --auto-retry` CLI flag
+- **C-2**: `mac_expire_stale_tasks(auto_retry)` MCP parameter
+- **C-2**: `POST /tasks/expire-stale?auto_retry=true` HTTP parameter
+- **C-3**: `expire_stale_agents()` sets offline agents with stale heartbeats
+- **C-3**: `CoordinationPolicy.agent_timeout` field (default 300s) + `MAC_AGENT_TIMEOUT` env var
+- **C-3**: `mac-agent expire-stale-agents` CLI command
+- **C-3**: `mac_expire_stale_agents` MCP tool
+- **C-3**: `POST /agents/expire-stale` HTTP endpoint
+- **C-4**: CLI structured logging (`logging` module replaces `print()` for diagnostics)
+- **C-4**: `--verbose` / `--quiet` global CLI flags
+- **C-5**: `mac-agent dashboard` command: project overview (plans, tasks, agents, conflicts, metrics)
+- MCP tools count: 13 → 14
+
+### Changed
+
+- SPEC.md updated to v2.4 (Phase C features, `agent_timeout` in CoordinationPolicy)
+- Test count: ~232 → ~240
+
 ## [0.5.0] — 2026-07-23
 
 ### Added
@@ -62,6 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SPEC.md updated to v2.1
 - Three-doc sync rule established (SPEC.md + CLAUDE.md + README.md)
 
+[0.6.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.6.0
 [0.5.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.5.0
 [0.4.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.4.0
 [0.3.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.3.0

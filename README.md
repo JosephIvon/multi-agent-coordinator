@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.5.0 | **License:** MIT
+**Version:** 0.6.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -149,6 +149,7 @@ Core endpoints:
 | `GET` | `/tasks/{task_id}/review-packet` | Generate review packet |
 | `POST` | `/tasks/expire-stale` | Expire tasks past their TTL |
 | `POST` | `/agents/{agent_id}/next` | Claim + start + worker packet (atomic) |
+| `POST` | `/agents/expire-stale` | Set offline agents with stale heartbeats |
 
 ---
 
@@ -193,7 +194,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (13)
+### Available Tools (14)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -210,6 +211,7 @@ claude mcp add mac -- mac-mcp-server
 | `mac_reject_review` | Reject reviewed task → rejected (auto-records conflict) | write |
 | `mac_expire_stale_tasks` | Expire non-terminal tasks past TTL → failed | write |
 | `mac_next_task` | Claim + start + output worker packet (atomic) | write |
+| `mac_expire_stale_agents` | Set offline agents with stale heartbeats | write |
 
 ### Available Resources (2)
 
@@ -270,6 +272,7 @@ registry = Registry(SQLiteTaskLedger("mac.db"))
 | `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
 | `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
 | `MAC_REVIEWER_CAPABILITY` | Capability name required for review actions |
+| `MAC_AGENT_TIMEOUT` | Seconds before an online agent is considered stale (default 300) |
 
 When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use `mark_review_ready()` → `accept_review()`/`reject_review()` instead.
 
@@ -291,6 +294,10 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 - Review packets include quality evidence summary; worker packets inline upstream handoff context.
 - Task TTL expiry: `expire_stale_tasks()` transitions stale tasks to `failed` with `TTL_EXPIRED`.
 - One-shot `mac-agent next` command: claim + start + output worker packet atomically.
+- Auto-retry on TTL expiry: `expire_stale_tasks(auto_retry=True)` resets tasks with retries remaining.
+- Agent heartbeat expiry: `expire_stale_agents()` auto-offlines stale agents.
+- `mac-agent dashboard` command: one-command project overview.
+- CLI structured logging with `--verbose` / `--quiet` flags.
 - Expose 6 aggregate metrics for observability (cycle time, handoff/quality pass rates, retry/conflict rates, active agents).
 
 ## What It Cannot Do Yet
@@ -318,7 +325,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (13 tools + 2 resources)
+  mcp_server.py      MCP Server (14 tools + 2 resources)
 ```
 
 ---

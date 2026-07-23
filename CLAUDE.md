@@ -8,11 +8,11 @@
 ## 0. 项目速查
 
 - **定位**:轻量多智能体**协作账本**,不是执行引擎
-- **版本**:0.5.0 Alpha | **Python**:≥ 3.10 | **License**:MIT
+- **版本**:0.6.0 Alpha | **Python**:≥ 3.10 | **License**:MIT
 - **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
 - **状态机**:`proposed → accepted → running → completed`(另含 `review_ready` / `rejected` / `failed` / `cancelled` / `superseded`;`review_ready` 仅 `require_review=True` 时启用)
-- **测试**:pytest ~232 用例,跑 `python -m pytest tests/ -q`
+- **测试**:pytest ~240 用例,跑 `python -m pytest tests/ -q`
 
 ---
 
@@ -116,7 +116,7 @@ src/mac/
 
 ## 9. MCP Server 指引
 
-AI 编码工具通过 MCP 接入 MAC,13 tools + 2 resources:
+AI 编码工具通过 MCP 接入 MAC,14 tools + 2 resources:
 
 | Tool | 作用 | 副作用 |
 |------|------|--------|
@@ -133,6 +133,7 @@ AI 编码工具通过 MCP 接入 MAC,13 tools + 2 resources:
 | `mac_reject_review` | review_ready → rejected(自动记录冲突) | 写 |
 | `mac_expire_stale_tasks` | 过期 TTL 任务 → failed | 写 |
 | `mac_next_task` | 认领+启动+输出 worker packet(原子操作) | 写 |
+| `mac_expire_stale_agents` | 心跳超时 agent → offline | 写 |
 
 Resources: `mac://capabilities`(能力清单), `mac://health`(健康状态)。
 

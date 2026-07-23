@@ -209,15 +209,22 @@ class Registry:
         self._publish(task, "task_failed", actor=agent_id, to_status="failed", payload={"error_code": error_code})
         return task
 
-    def expire_stale_tasks(self, *, now: float | None = None) -> list[TaskTransfer]:
-        """Transition non-terminal tasks past their TTL to ``failed``.
+    def expire_stale_tasks(
+        self, *, now: float | None = None, auto_retry: bool = False
+    ) -> list[TaskTransfer]:
+        """Transition non-terminal tasks past their TTL.
 
         Scans tasks in ``running`` / ``review_ready`` / ``accepted`` states
         whose ``updated_at`` (or ``created_at`` fallback) + ``ttl_seconds``
-        precedes ``now``. Each is failed with ``error_code='TTL_EXPIRED'``.
+        precedes ``now``.
+
+        When ``auto_retry=True`` and the task has retries remaining
+        (``retry_count < policy.max_retry_count``), the task is reset to
+        ``proposed`` with an incremented retry count instead of being failed.
+        Otherwise the task is failed with ``error_code='TTL_EXPIRED'``.
 
         MAC does not run a background thread; callers (CLI, cron) invoke this
-        periodically. Returns the list of expired tasks.
+        periodically. Returns the list of expired/retried tasks.
         """
         checkpoint = now if now is not None else time.time()
         candidates: list[TaskTransfer] = []
@@ -230,13 +237,59 @@ class Registry:
             if updated is None:
                 continue
             if (checkpoint - updated) > task.ttl_seconds:
-                failed = self.fail_task(
-                    task.task_id,
-                    agent_id="system",
-                    error_code="TTL_EXPIRED",
-                    message=f"Task exceeded TTL of {task.ttl_seconds}s in state {task.status!r}.",
-                )
-                expired.append(failed)
+                if auto_retry and task.retry_count < self.policy.max_retry_count:
+                    # Reset to proposed with incremented retry count.
+                    task.retry_count += 1
+                    task.error_code = None
+                    task.target_agent_id = task.fallback_agent_id
+                    task.updated_at = _now_id()
+                    previous_status = task.status
+                    task.status = "proposed"
+                    self.ledger.save_task_transfer(task)
+                    self._audit(
+                        task, "retry_task", "system",
+                        from_status=previous_status, to_status="proposed",
+                        message=f"Auto-retry: TTL expired ({task.ttl_seconds}s)",
+                    )
+                    self._publish(
+                        task, "task_retried", actor="system",
+                        from_status=previous_status, to_status="proposed",
+                        payload={"retry_count": task.retry_count, "trigger": "ttl_expiry"},
+                    )
+                    expired.append(task)
+                else:
+                    failed = self.fail_task(
+                        task.task_id,
+                        agent_id="system",
+                        error_code="TTL_EXPIRED",
+                        message=f"Task exceeded TTL of {task.ttl_seconds}s in state {task.status!r}.",
+                    )
+                    expired.append(failed)
+        return expired
+
+    def expire_stale_agents(
+        self, *, timeout_seconds: int | None = None, now: float | None = None
+    ) -> list[Any]:
+        """Set agents offline if their last heartbeat is older than the timeout.
+
+        Agents with status != ``online`` are skipped. Returns the list of
+        agents that were expired (set to ``offline``).
+
+        The timeout defaults to ``policy.agent_timeout`` (300s).
+        """
+        timeout = timeout_seconds if timeout_seconds is not None else self.policy.agent_timeout
+        checkpoint = now if now is not None else time.time()
+        agents = self.ledger.list_agent_cards()
+        expired: list[Any] = []
+        for agent in agents:
+            if agent.status != "online":
+                continue
+            # last_heartbeat == 0 means never heartbeated; skip (agent just registered)
+            if agent.last_heartbeat == 0:
+                continue
+            if (checkpoint - agent.last_heartbeat) > timeout:
+                self.heartbeat_agent(agent.agent_id, status="offline")
+                expired.append(agent)
         return expired
 
     def record_checkpoint(self, task_id: str, *, agent_id: str, checkpoint: dict[str, Any]) -> TaskTransfer:

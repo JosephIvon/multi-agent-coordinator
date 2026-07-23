@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 from mac.events import TaskEventBus
@@ -582,6 +584,62 @@ def test_expire_stale_tasks_ignores_completed_and_cancelled(tmp_path):
     assert expired == []
 
 
+def test_expire_stale_auto_retry_resets_to_proposed(tmp_path):
+    """auto_retry=True + retries remaining → task reset to proposed."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _task("retry-me", status="running", ttl_seconds=60)
+    registry.submit_task(task)
+    # Backdate
+    t = registry.get_task("retry-me")
+    from datetime import datetime, timezone, timedelta
+    t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    registry.ledger.save_task_transfer(t)
+
+    result = registry.expire_stale_tasks(auto_retry=True)
+
+    assert len(result) == 1
+    assert result[0].task_id == "retry-me"
+    assert result[0].status == "proposed"
+    assert result[0].retry_count == 1
+
+
+def test_expire_stale_auto_retry_fails_when_retries_exhausted(tmp_path):
+    """auto_retry=True but retry_count >= max_retry_count → task failed."""
+    policy = CoordinationPolicy(max_retry_count=1)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    task = _task("no-retry", status="running", ttl_seconds=60, retry_count=1)
+    registry.submit_task(task)
+    # Backdate
+    t = registry.get_task("no-retry")
+    from datetime import datetime, timezone, timedelta
+    t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    registry.ledger.save_task_transfer(t)
+
+    result = registry.expire_stale_tasks(auto_retry=True)
+
+    assert len(result) == 1
+    assert result[0].status == "failed"
+    assert result[0].error_code == "TTL_EXPIRED"
+
+
+def test_expire_stale_no_auto_retry_always_fails(tmp_path):
+    """auto_retry=False (default) → always fail, even with retries remaining."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _task("force-fail", status="running", ttl_seconds=60)
+    registry.submit_task(task)
+    # Backdate
+    t = registry.get_task("force-fail")
+    from datetime import datetime, timezone, timedelta
+    t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+    registry.ledger.save_task_transfer(t)
+
+    result = registry.expire_stale_tasks(auto_retry=False)
+
+    assert len(result) == 1
+    assert result[0].status == "failed"
+    assert result[0].error_code == "TTL_EXPIRED"
+
+
 # ---------------------------------------------------------------------------
 # P5-2: Review lifecycle tests — mark_review_ready, accept_review, reject_review
 # ---------------------------------------------------------------------------
@@ -897,3 +955,94 @@ def test_review_capability_noop_when_not_configured(tmp_path):
     # No agent registered, but no capability requirement → should succeed
     result = reg.accept_review("task-rv", reviewer_id="anyone")
     assert result.status == "completed"
+
+
+# ---------------------------------------------------------------------------
+# C-3: Agent heartbeat expiry
+# ---------------------------------------------------------------------------
+
+
+def test_expire_stale_agents_sets_offline(tmp_path):
+    """Agent with old heartbeat is set offline."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="stale-agent",
+        name="Stale",
+        capabilities=[AgentCapability(name="write_code")],
+        status="online",
+        last_heartbeat=time.time() - 600,  # 10 minutes ago
+    ))
+
+    expired = registry.expire_stale_agents(timeout_seconds=300)
+
+    assert len(expired) == 1
+    assert expired[0].agent_id == "stale-agent"
+    agent = registry.get_agent("stale-agent")
+    assert agent.status == "offline"
+
+
+def test_expire_stale_agents_skips_fresh_agents(tmp_path):
+    """Agent with recent heartbeat is not expired."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="fresh-agent",
+        name="Fresh",
+        capabilities=[AgentCapability(name="write_code")],
+        status="online",
+        last_heartbeat=time.time(),  # just now
+    ))
+
+    expired = registry.expire_stale_agents(timeout_seconds=300)
+
+    assert expired == []
+    agent = registry.get_agent("fresh-agent")
+    assert agent.status == "online"
+
+
+def test_expire_stale_agents_skips_already_offline(tmp_path):
+    """Agents already offline are not touched."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="offline-agent",
+        name="Offline",
+        capabilities=[AgentCapability(name="write_code")],
+        status="offline",
+        last_heartbeat=time.time() - 600,
+    ))
+
+    expired = registry.expire_stale_agents(timeout_seconds=300)
+
+    assert expired == []
+
+
+def test_expire_stale_agents_skips_never_heartbeated(tmp_path):
+    """Agents with last_heartbeat=0 (just registered) are not expired."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="new-agent",
+        name="New",
+        capabilities=[AgentCapability(name="write_code")],
+        status="online",
+        last_heartbeat=0,
+    ))
+
+    expired = registry.expire_stale_agents(timeout_seconds=300)
+
+    assert expired == []
+
+
+def test_expire_stale_agents_uses_policy_default_timeout(tmp_path):
+    """When timeout_seconds not given, uses policy.agent_timeout."""
+    policy = CoordinationPolicy(agent_timeout=60)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    registry.register_agent(AgentCard(
+        agent_id="slow-agent",
+        name="Slow",
+        capabilities=[AgentCapability(name="write_code")],
+        status="online",
+        last_heartbeat=time.time() - 120,  # 2 minutes ago
+    ))
+
+    expired = registry.expire_stale_agents()  # uses policy default 60s
+
+    assert len(expired) == 1

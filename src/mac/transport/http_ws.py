@@ -299,10 +299,15 @@ def create_app(registry: Registry) -> FastAPI:
             )
         )
 
+    @app.post("/agents/expire-stale")
+    def expire_stale_agents(timeout_seconds: int | None = None) -> list[Any]:
+        """Set offline agents whose last heartbeat exceeds the timeout."""
+        return registry.expire_stale_agents(timeout_seconds=timeout_seconds)
+
     @app.post("/tasks/expire-stale")
-    def expire_stale_tasks() -> list[TaskTransfer]:
-        """Transition non-terminal tasks past their TTL to failed."""
-        return registry.expire_stale_tasks()
+    def expire_stale_tasks(auto_retry: bool = False) -> list[TaskTransfer]:
+        """Transition non-terminal tasks past their TTL to failed, or auto-retry."""
+        return registry.expire_stale_tasks(auto_retry=auto_retry)
 
     @app.post("/agents/{agent_id}/next")
     def next_task(agent_id: str, request: ClaimTaskRequest) -> Response:

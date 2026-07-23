@@ -67,7 +67,7 @@ def _safe_call(func: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools (13)
+# Tools (14)
 # ---------------------------------------------------------------------------
 
 
@@ -321,18 +321,19 @@ def mac_reject_review(task_id: str, reviewer_id: str, reason: str = "") -> str:
 
 
 @mcp.tool()
-def mac_expire_stale_tasks() -> str:
+def mac_expire_stale_tasks(auto_retry: bool = False) -> str:
     """Expire non-terminal tasks past their TTL.
 
     Scans for tasks in proposed, accepted, running, or review_ready status
-    whose TTL has elapsed and transitions them to ``failed`` with
-    ``error_code="TTL_EXPIRED"``.
+    whose TTL has elapsed. When auto_retry=True and the task has retries
+    remaining, it is reset to ``proposed`` instead of being failed.
 
-    :returns: JSON array of expired TaskTransfer objects.
+    :param auto_retry: If True, auto-retry tasks with retries remaining.
+    :returns: JSON array of expired/retried TaskTransfer objects.
     """
 
     def _do() -> Any:
-        return _registry().expire_stale_tasks()
+        return _registry().expire_stale_tasks(auto_retry=auto_retry)
 
     return _safe_call(_do)
 
@@ -367,6 +368,20 @@ def mac_next_task(
             return None
         started = reg.start_task(claimed.task_id, agent_id)
         return reg.prepare_worker_packet(started.task_id, agent_id=agent_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_expire_stale_agents(timeout_seconds: int | None = None) -> str:
+    """Set offline agents whose last heartbeat is older than the timeout.
+
+    :param timeout_seconds: Timeout in seconds. Defaults to policy.agent_timeout (300s).
+    :returns: JSON array of expired AgentCard objects.
+    """
+
+    def _do() -> Any:
+        return _registry().expire_stale_agents(timeout_seconds=timeout_seconds)
 
     return _safe_call(_do)
 

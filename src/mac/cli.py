@@ -2,12 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import sys
 from pathlib import Path
 from typing import Sequence
+
+logger = logging.getLogger("mac")
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mac-agent")
+    parser.add_argument("--verbose", action="store_true", help="Show debug-level output")
+    parser.add_argument("--quiet", action="store_true", help="Suppress non-error output")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     contract = subcommands.add_parser("contract", help="Generate a risk-based test contract")
@@ -201,6 +207,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     expire = subcommands.add_parser("expire-stale", help="Expire tasks past their TTL")
     expire.add_argument("--db", default="mac.db")
+    expire.add_argument("--auto-retry", action="store_true", help="Auto-retry tasks with retries remaining")
+
+    expire_agents = subcommands.add_parser("expire-stale-agents", help="Set offline agents with stale heartbeats")
+    expire_agents.add_argument("--db", default="mac.db")
+    expire_agents.add_argument("--timeout", type=int, default=None, help="Timeout in seconds (default: from policy)")
+
+    dashboard = subcommands.add_parser("dashboard", help="Show project overview: plans, tasks, agents, conflicts, metrics")
+    dashboard.add_argument("--db", default="mac.db")
 
     next_cmd = subcommands.add_parser(
         "next", help="Claim + start the next ready task and print its worker packet"
@@ -256,6 +270,15 @@ def _parse_verification(value: str):
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    # Configure logging based on global flags.
+    if getattr(args, "verbose", False):
+        level = logging.DEBUG
+    elif getattr(args, "quiet", False):
+        level = logging.WARNING
+    else:
+        level = logging.INFO
+    logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
 
     if args.command == "contract":
         from mac.testing.contracts import TestContract
@@ -624,12 +647,90 @@ def main(argv: Sequence[str] | None = None) -> int:
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
 
-        expired = Registry(SQLiteStorage(Path(args.db))).expire_stale_tasks()
+        auto_retry = getattr(args, "auto_retry", False)
+        expired = Registry(SQLiteStorage(Path(args.db))).expire_stale_tasks(auto_retry=auto_retry)
         if expired:
             for task in expired:
-                print(f"Expired: {task.task_id} (TTL_EXPIRED)")
+                action = "Retried" if task.status == "proposed" else "Expired"
+                logger.info("%s: %s (%s)", action, task.task_id, task.status)
         else:
-            print("No stale tasks found.")
+            logger.info("No stale tasks found.")
+        return 0
+
+    if args.command == "expire-stale-agents":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        timeout = getattr(args, "timeout", None)
+        expired = Registry(SQLiteStorage(Path(args.db))).expire_stale_agents(timeout_seconds=timeout)
+        if expired:
+            for agent in expired:
+                logger.info("Expired: %s (offline)", agent.agent_id)
+        else:
+            logger.info("No stale agents found.")
+        return 0
+
+    if args.command == "dashboard":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+        from mac.metrics import compute_metrics, format_table
+
+        reg = Registry(SQLiteStorage(Path(args.db)))
+
+        # Plans
+        plans = reg.list_plans(status="active")
+        print("MAC Dashboard")
+        print("=" * 50)
+        if plans:
+            print(f"\nPlans ({len(plans)} active):")
+            for p in plans:
+                tasks_in_plan = [t for t in reg.list_tasks() if t.plan_id == p.plan_id]
+                by_status: dict[str, int] = {}
+                for t in tasks_in_plan:
+                    by_status[t.status] = by_status.get(t.status, 0) + 1
+                status_str = ", ".join(f"{v} {k}" for k, v in sorted(by_status.items()))
+                print(f"  {p.plan_id}  {status_str or 'no tasks'}")
+        else:
+            print("\nPlans: none active")
+
+        # Tasks
+        all_tasks = reg.list_tasks()
+        ready = reg.list_ready_tasks()
+        running = [t for t in all_tasks if t.status == "running"]
+        review_ready = [t for t in all_tasks if t.status == "review_ready"]
+        print(f"\nTasks:")
+        print(f"  {len(ready)} ready to claim")
+        print(f"  {len(running)} in-flight (running)")
+        if review_ready:
+            print(f"  {len(review_ready)} awaiting review")
+
+        # Agents
+        agents = reg.discover()
+        online = [a for a in agents if a.status == "online"]
+        print(f"\nAgents:")
+        print(f"  {len(online)} online" + (f" ({', '.join(a.agent_id for a in online)})" if online else ""))
+
+        # Conflicts
+        conflicts = reg.list_conflicts(resolved=False)
+        if conflicts:
+            print(f"\nConflicts ({len(conflicts)} unresolved):")
+            for c in conflicts[:5]:
+                desc = c.description[:60] + ("..." if len(c.description) > 60 else "")
+                print(f"  {c.source}: {desc}")
+        else:
+            print("\nConflicts: none unresolved")
+
+        # Metrics
+        metrics = compute_metrics(reg.ledger)
+        m = metrics
+        print(f"\nMetrics:")
+        print(f"  cycle_time   {m.get('task_cycle_time_seconds', 0):.2f}s  |  "
+              f"handoff_rate  {m.get('handoff_success_rate', 0):.0%}  |  "
+              f"quality_rate  {m.get('quality_gate_pass_rate', 0):.0%}")
+        print(f"  retry_rate   {m.get('retry_rate', 0):.0%}  |  "
+              f"conflict_rate  {m.get('conflict_rate', 0):.0%}  |  "
+              f"active_agents  {m.get('active_agents', 0)}")
+
         return 0
 
     if args.command == "next":
@@ -643,7 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             best_effort=args.best_effort,
         )
         if claimed is None:
-            print("No claimable tasks found.", file=sys.stderr)
+            logger.warning("No claimable tasks found.")
             return 1
         started = registry.start_task(claimed.task_id, args.agent_id)
         packet = registry.prepare_worker_packet(claimed.task_id, agent_id=args.agent_id)

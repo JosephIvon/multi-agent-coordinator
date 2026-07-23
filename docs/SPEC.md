@@ -1,8 +1,8 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.3
+> Version: 2.4
 > Date: 2026-07-23
-> Status: implemented for Phase B collaboration
+> Status: implemented for Phase C production readiness
 
 ---
 
@@ -199,6 +199,7 @@ class CoordinationPolicy(BaseModel):
     reviewer_capability: str | None = None
     path_rule: PathRule = Field(default_factory=PathRule)
     max_retry_count: int = Field(default=3, ge=0)
+    agent_timeout: int = Field(default=300, ge=0)
 ```
 
 Environment variable mapping (`from_env()`):
@@ -210,6 +211,7 @@ Environment variable mapping (`from_env()`):
 | `MAC_MAX_RETRY_COUNT` | Integer override for retry cap |
 | `MAC_PATH_RULES` | `allowed1,allowed2\|forbidden1,forbidden2` format |
 | `MAC_REVIEWER_CAPABILITY` | Capability name required for `accept_review`/`reject_review` |
+| `MAC_AGENT_TIMEOUT` | Seconds before an online agent is considered stale (default 300) |
 
 ---
 
@@ -226,7 +228,7 @@ Main operations:
 - Handoff: `save_handoff_result()`, `get_handoff_result()`
 - Conflict: `record_conflict()`, `list_conflicts()`, `resolve_conflict()`
 - Packet: `prepare_worker_packet()`, `prepare_review_packet()`
-- Expiry: `expire_stale_tasks()`
+- Expiry: `expire_stale_tasks()`, `expire_stale_agents()`
 - Audit: `get_audit_trail(trace_id)`
 - Metrics: `get_metrics()`
 
@@ -297,6 +299,38 @@ Environment variable: `MAC_REVIEWER_CAPABILITY=review_code`.
 
 ---
 
+## 6.2 Phase C Features
+
+### C-1: Publish Workflow
+
+Tag-triggered PyPI upload via GitHub Actions (`.github/workflows/publish.yml`). Uses PyPI trusted publishing — no API token needed after initial setup.
+
+### C-2: Retry with TTL Expiry
+
+`expire_stale_tasks(auto_retry=True)` resets tasks with remaining retries to `proposed` instead of `failed`. The retry count is incremented and an audit event with `trigger=ttl_expiry` is recorded.
+
+CLI: `mac-agent expire-stale --auto-retry`
+MCP: `mac_expire_stale_tasks(auto_retry=True)`
+HTTP: `POST /tasks/expire-stale?auto_retry=true`
+
+### C-3: Agent Heartbeat Expiry
+
+`expire_stale_agents()` sets agents offline if their `last_heartbeat` is older than the timeout. Defaults to `policy.agent_timeout` (300s, configurable via `MAC_AGENT_TIMEOUT`).
+
+CLI: `mac-agent expire-stale-agents --timeout 300`
+MCP: `mac_expire_stale_agents(timeout_seconds=300)`
+HTTP: `POST /agents/expire-stale?timeout_seconds=300`
+
+### C-4: Structured Logging
+
+CLI uses Python `logging` module instead of `print()` for diagnostic output. Machine-parseable output (JSON, Markdown packets) stays on stdout; diagnostics go to stderr. Global flags: `--verbose` (DEBUG), `--quiet` (WARNING).
+
+### C-5: Dashboard Command
+
+`mac-agent dashboard` shows a concise project overview: active plans with task counts, ready/in-flight/review-ready tasks, online agents, unresolved conflicts, and key metrics.
+
+---
+
 ## 7. SQLite Ledger
 
 Tables:
@@ -355,7 +389,7 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (13)
+### Tools (14)
 
 | Tool | Parameters | Returns | Side Effect |
 |------|-----------|---------|-------------|
@@ -372,6 +406,7 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_reject_review` | `task_id`, `reviewer_id`, `reason?` | JSON TaskTransfer | write |
 | `mac_expire_stale_tasks` | *(none)* | JSON array of expired TaskTransfer | write |
 | `mac_next_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | Markdown worker packet | write |
+| `mac_expire_stale_agents` | `timeout_seconds?` | JSON array of expired AgentCard | write |
 
 `mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
 
