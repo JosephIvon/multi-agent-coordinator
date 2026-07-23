@@ -136,3 +136,29 @@ def test_http_app_runs_failure_recovery_loop(tmp_path):
         json={"agent_id": "planner", "reason": "obsolete"},
     ).json()
     assert cancelled["status"] == "cancelled"
+
+
+def test_http_metrics_returns_aggregate_indicators(tmp_path):
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    client = TestClient(create_app(registry))
+
+    # Empty ledger — all metrics should be zero.
+    response = client.get("/metrics")
+    assert response.status_code == 200
+    metrics = response.json()
+    assert metrics["active_agents"] == 0
+    assert metrics["conflict_rate"] == 0.0
+    assert metrics["quality_gate_pass_rate"] == 0.0
+
+    # Register an agent and submit a task to get non-zero samples.
+    agent = AgentCard(agent_id="worker", name="Worker", capabilities=[AgentCapability(name="write_code")])
+    client.post("/agents/register", json=agent.model_dump(mode="json"))
+    task = TaskTransfer(
+        task_id="task-1",
+        payload=TaskPayload(type="write_code", summary="Metrics test"),
+    )
+    client.post("/tasks", json=task.model_dump(mode="json"))
+
+    metrics_after = client.get("/metrics").json()
+    assert metrics_after["samples"]["task_transfers"] == 1
+    assert metrics_after["active_agents"] == 1

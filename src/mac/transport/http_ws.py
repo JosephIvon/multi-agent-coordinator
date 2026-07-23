@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel
 
+from mac.metrics import compute_metrics
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
     AgentCard,
@@ -69,6 +70,11 @@ class ClosePlanRequest(BaseModel):
 
 class ResolveConflictRequest(BaseModel):
     resolution: str
+
+
+class ReviewRejectRequest(BaseModel):
+    reviewer_id: str
+    reason: str = ""
 
 
 def create_app(registry: Registry) -> FastAPI:
@@ -277,9 +283,29 @@ def create_app(registry: Registry) -> FastAPI:
     def cancel_task(task_id: str, request: CancelTaskRequest) -> TaskTransfer:
         return _call_task(lambda: registry.cancel_task(task_id, agent_id=request.agent_id, reason=request.reason))
 
+    @app.post("/tasks/{task_id}/mark-review-ready")
+    def mark_review_ready(task_id: str, request: AgentActionRequest) -> TaskTransfer:
+        return _call_task(lambda: registry.mark_review_ready(task_id, agent_id=request.agent_id))
+
+    @app.post("/tasks/{task_id}/accept-review")
+    def accept_review(task_id: str, request: AgentActionRequest) -> TaskTransfer:
+        return _call_task(lambda: registry.accept_review(task_id, reviewer_id=request.agent_id))
+
+    @app.post("/tasks/{task_id}/reject-review")
+    def reject_review(task_id: str, request: ReviewRejectRequest) -> TaskTransfer:
+        return _call_task(
+            lambda: registry.reject_review(
+                task_id, reviewer_id=request.reviewer_id, reason=request.reason
+            )
+        )
+
     @app.get("/ledger/{trace_id}")
     def get_ledger(trace_id: str) -> list[Any]:
         return registry.get_audit_trail(trace_id)
+
+    @app.get("/metrics")
+    def get_metrics() -> dict[str, Any]:
+        return compute_metrics(registry.ledger)
 
     return app
 

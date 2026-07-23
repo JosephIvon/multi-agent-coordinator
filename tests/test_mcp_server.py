@@ -13,10 +13,13 @@ from mcp.server.fastmcp.exceptions import ToolError
 from mac.mcp_server import (
     capabilities_resource,
     health_resource,
+    mac_accept_review,
     mac_claim_task,
     mac_fail_task,
     mac_list_ready_tasks,
+    mac_mark_review_ready,
     mac_record_quality_and_complete,
+    mac_reject_review,
     mac_review_packet,
     mac_save_handoff,
     mac_submit_task,
@@ -26,6 +29,7 @@ from mac.mcp_server import (
 from mac.protocol.messages import (
     AgentCapability,
     AgentCard,
+    CoordinationPolicy,
     TaskPayload,
     TaskTransfer,
 )
@@ -289,6 +293,84 @@ class TestMacReviewPacket:
         assert "not_found" in str(excinfo.value)
 
 
+class TestMacReviewTools:
+    """Review lifecycle MCP tools.
+
+    Patches ``mac.mcp_server._registry`` with a Registry whose
+    ``require_review`` policy is True; the autouse ``_use_tmp_db`` fixture
+    leaves _registry defaulting to require_review=False which would make
+    ``mac_mark_review_ready`` reject every transition.
+    """
+
+    @staticmethod
+    def _setup_review_registry(tmp_path: Path) -> Registry:
+        ledger = SQLiteTaskLedger(tmp_path / "mac.db")
+        reg = Registry(ledger, policy=CoordinationPolicy(require_review=True))
+        reg.register_agent(_agent("worker", "write_code"))
+        reg.submit_task(TaskTransfer.model_validate(_task_dict("task-1", status="running")))
+        return reg
+
+    @staticmethod
+    def _patch_registry(monkeypatch: pytest.MonkeyPatch, reg: Registry) -> None:
+        monkeypatch.setattr("mac.mcp_server._registry", lambda: reg)
+
+    def test_mark_review_ready_transitions_running_to_review_ready(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reg = self._setup_review_registry(tmp_path)
+        self._patch_registry(monkeypatch, reg)
+
+        result = mac_mark_review_ready(task_id="task-1", agent_id="worker")
+        parsed = json.loads(result)
+
+        assert parsed["status"] == "review_ready"
+
+    def test_mark_review_ready_rejected_when_require_review_is_false(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reg = Registry(
+            SQLiteTaskLedger(tmp_path / "mac.db"),
+            policy=CoordinationPolicy(require_review=False),
+        )
+        reg.register_agent(_agent("worker", "write_code"))
+        reg.submit_task(TaskTransfer.model_validate(_task_dict("task-1", status="running")))
+        self._patch_registry(monkeypatch, reg)
+
+        with pytest.raises(ToolError) as excinfo:
+            mac_mark_review_ready(task_id="task-1", agent_id="worker")
+        assert "state_conflict" in str(excinfo.value)
+
+    def test_accept_review_completes_review_ready_task(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reg = self._setup_review_registry(tmp_path)
+        reg.mark_review_ready("task-1", agent_id="worker")
+        self._patch_registry(monkeypatch, reg)
+
+        result = mac_accept_review(task_id="task-1", reviewer_id="reviewer")
+        parsed = json.loads(result)
+
+        assert parsed["status"] == "completed"
+
+    def test_reject_review_records_conflict_and_marks_rejected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        reg = self._setup_review_registry(tmp_path)
+        reg.mark_review_ready("task-1", agent_id="worker")
+        self._patch_registry(monkeypatch, reg)
+
+        result = mac_reject_review(
+            task_id="task-1", reviewer_id="reviewer", reason="needs more tests"
+        )
+        parsed = json.loads(result)
+
+        assert parsed["status"] == "rejected"
+        conflicts = reg.list_conflicts()
+        assert len(conflicts) == 1
+        assert conflicts[0].source == "reject_review"
+        assert conflicts[0].description == "needs more tests"
+
+
 class TestMacWorkerPacket:
     def test_worker_packet_returns_markdown_after_claim(self, tmp_path: Path) -> None:
         reg, _ = _registry_with_db(tmp_path)
@@ -538,14 +620,17 @@ class TestStdioE2E:
                 result = await session.initialize()
                 assert result.serverInfo.name == "mac-coordinator"
 
-                # 2. List tools — expect 8
+                # 2. List tools — expect 11
                 tools_result = await session.list_tools()
                 tool_names = {tool.name for tool in tools_result.tools}
                 assert tool_names == {
+                    "mac_accept_review",
                     "mac_claim_task",
                     "mac_fail_task",
                     "mac_list_ready_tasks",
+                    "mac_mark_review_ready",
                     "mac_record_quality_and_complete",
+                    "mac_reject_review",
                     "mac_review_packet",
                     "mac_save_handoff",
                     "mac_submit_task",
@@ -602,3 +687,12 @@ class TestStdioE2E:
                 assert "Worker Task: stdio-task-1" in packet_text
                 assert "## Handoff Format" in packet_text
                 assert "## Acceptance Criteria" in packet_text
+
+                # 7. Review lifecycle is exposed over stdio. The subprocess uses
+                #    require_review=False, so mark-ready returns a domain conflict.
+                review_result = await session.call_tool(
+                    "mac_mark_review_ready",
+                    arguments={"task_id": "stdio-task-1", "agent_id": "worker"},
+                )
+                assert review_result.isError is True
+                assert "state_conflict" in review_result.content[0].text

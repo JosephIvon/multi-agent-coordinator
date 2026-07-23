@@ -67,7 +67,7 @@ def _safe_call(func: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools (8)
+# Tools (11)
 # ---------------------------------------------------------------------------
 
 
@@ -265,6 +265,57 @@ def mac_worker_packet(task_id: str, agent_id: str | None = None) -> str:
 
     def _do() -> Any:
         return _registry().prepare_worker_packet(task_id, agent_id=agent_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_mark_review_ready(task_id: str, agent_id: str) -> str:
+    """Move a running task to ``review_ready``.
+
+    Only valid when ``CoordinationPolicy.require_review=True``; otherwise
+    the registry rejects the transition with ``state_conflict``.
+
+    :param task_id: ID of the running task.
+    :param agent_id: ID of the agent performing the handoff.
+    :returns: JSON of the ``review_ready`` TaskTransfer, or state_conflict error.
+    """
+
+    def _do() -> Any:
+        return _registry().mark_review_ready(task_id, agent_id=agent_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_accept_review(task_id: str, reviewer_id: str) -> str:
+    """Accept a task in ``review_ready`` status, completing it.
+
+    :param task_id: ID of the task to accept.
+    :param reviewer_id: ID of the reviewer accepting the task.
+    :returns: JSON of the completed TaskTransfer.
+    """
+
+    def _do() -> Any:
+        return _registry().accept_review(task_id, reviewer_id=reviewer_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_reject_review(task_id: str, reviewer_id: str, reason: str = "") -> str:
+    """Reject a task in ``review_ready`` status.
+
+    The rejection reason is automatically recorded as a blocking conflict.
+
+    :param task_id: ID of the task to reject.
+    :param reviewer_id: ID of the reviewer rejecting the task.
+    :param reason: Human-readable rejection reason; recorded in the conflict.
+    :returns: JSON of the rejected TaskTransfer.
+    """
+
+    def _do() -> Any:
+        return _registry().reject_review(task_id, reviewer_id=reviewer_id, reason=reason)
 
     return _safe_call(_do)
 

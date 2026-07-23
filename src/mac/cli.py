@@ -177,6 +177,18 @@ def _build_parser() -> argparse.ArgumentParser:
     retry.add_argument("--agent-id", required=True)
     retry.add_argument("--fallback-agent-id")
 
+    review_lifecycle = subcommands.add_parser(
+        "review-lifecycle",
+        help="Mark, accept, or reject a task review",
+    )
+    review_lifecycle.add_argument("--db", default="mac.db")
+    review_lifecycle.add_argument("--action", choices=["mark-ready", "accept", "reject"], required=True)
+    review_lifecycle.add_argument("--task-id", required=True)
+    review_lifecycle.add_argument("--agent-id")
+    review_lifecycle.add_argument("--reviewer-id")
+    review_lifecycle.add_argument("--reason", default="")
+    review_lifecycle.add_argument("--plan-id")
+
     cancel = subcommands.add_parser("cancel", help="Cancel a task")
     cancel.add_argument("--db", default="mac.db")
     cancel.add_argument("--task-id", required=True)
@@ -548,6 +560,44 @@ def main(argv: Sequence[str] | None = None) -> int:
             agent_id=args.agent_id,
             reason=args.reason,
         )
+        _print_json(task.model_dump(mode="json"))
+        return 0
+
+    if args.command == "review-lifecycle":
+        from mac.protocol.messages import HandoffResult, VerificationEntry
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        if args.action == "mark-ready":
+            handoff = (
+                HandoffResult(
+                    task_id=args.task_id,
+                    plan_id=args.plan_id or "",
+                    agent_id=args.agent_id or "",
+                    verification=[
+                        VerificationEntry(
+                            command="cli mark-review-ready",
+                            result="pass",
+                        )
+                    ],
+                )
+                if args.agent_id
+                else None
+            )
+            task = registry.mark_review_ready(
+                args.task_id,
+                agent_id=args.agent_id,
+                handoff=handoff,
+            )
+        elif args.action == "accept":
+            task = registry.accept_review(args.task_id, reviewer_id=args.reviewer_id or "")
+        else:
+            task = registry.reject_review(
+                args.task_id,
+                reviewer_id=args.reviewer_id or "",
+                reason=args.reason,
+            )
         _print_json(task.model_dump(mode="json"))
         return 0
 
