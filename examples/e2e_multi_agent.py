@@ -1,4 +1,4 @@
-"""Real multi-agent E2E validation for MAC v0.4.0.
+"""Real multi-agent E2E validation for MAC v0.5.0.
 
 Simulates two real AI agents (claude-code + qoder) collaborating on the
 same project through a shared MAC ledger. Exercises the full path:
@@ -8,14 +8,19 @@ same project through a shared MAC ledger. Exercises the full path:
 3. Qoder submits task B depending on A, blocked until A completes
 4. Dependency unlock verification
 5. Handoff passing (Claude's handoff read by Qoder's review packet)
-6. Review lifecycle: mark_review_ready → accept_review
+6. Review lifecycle: mark_review_ready -> accept_review
 7. Metrics aggregation reflects the collaboration
+8. [B-1] Review packet includes quality evidence
+9. [B-2] Worker packet inlines upstream handoff summary
+10. [B-3] TTL expiry recovers stuck tasks
+11. [B-5] Reviewer capability validation gates accept/reject
 
 Run: python examples/e2e_multi_agent.py
 """
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -169,7 +174,7 @@ def main() -> None:
     check("No input validation" in packet, "Review packet shows risks")
 
     # ------------------------------------------------------------------
-    banner("Step 7: Planner accepts the review → task A completed")
+    banner("Step 7: Planner accepts the review -> task A completed")
     # ------------------------------------------------------------------
     completed_a = registry.accept_review("task-write-utility", reviewer_id="planner")
     check(completed_a.status == "completed", "Task A accepted/completed")
@@ -267,6 +272,183 @@ def main() -> None:
     check("mark_review_ready" in actions_a, "Audit: review_ready recorded")
     check("accept_review" in actions_a, "Audit: accept_review recorded")
 
+    # ==================================================================
+    # Phase B validation (v0.5.0)
+    # ==================================================================
+
+    # ------------------------------------------------------------------
+    banner("Step 14 [B-1]: Review packet includes quality evidence")
+    # ------------------------------------------------------------------
+    # Submit a task with quality evidence, then verify the review packet
+    task_d = TaskTransfer(
+        task_id="task-with-quality",
+        plan_id="plan-e2e",
+        source_agent_id="planner",
+        payload=TaskPayload(type="write_code", summary="Task with quality evidence"),
+    )
+    registry.submit_task(task_d)
+    registry.claim_next_task(agent_id="claude-code", capability="write_code")
+    registry.start_task("task-with-quality", "claude-code")
+
+    # Submit quality evidence before marking review-ready
+    registry.submit_quality_result(
+        "task-with-quality",
+        {
+            "agent_id": "claude-code",
+            "command": "ruff check src/feature.py",
+            "status": "passed",
+            "evidence": ["no issues found"],
+        },
+    )
+    registry.submit_quality_result(
+        "task-with-quality",
+        {
+            "agent_id": "claude-code",
+            "command": "pytest -q",
+            "status": "passed",
+            "evidence": ["12 passed", "2 skipped"],
+        },
+    )
+    registry.mark_review_ready("task-with-quality", agent_id="claude-code")
+
+    review_pkt = registry.prepare_review_packet("task-with-quality")
+    check("Quality Evidence" in review_pkt, "B-1: Review packet has Quality Evidence section")
+    check("ruff check" in review_pkt, "B-1: Review packet shows ruff command")
+    check("pytest -q" in review_pkt, "B-1: Review packet shows pytest command")
+    check("passed" in review_pkt, "B-1: Review packet shows pass status")
+
+    registry.accept_review("task-with-quality", reviewer_id="planner")
+
+    # ------------------------------------------------------------------
+    banner("Step 15 [B-2]: Worker packet inlines upstream handoff summary")
+    # ------------------------------------------------------------------
+    # Task E depends on task D (which is now completed with handoff)
+    task_e = TaskTransfer(
+        task_id="task-downstream",
+        plan_id="plan-e2e",
+        source_agent_id="planner",
+        depends_on=["task-with-quality"],
+        payload=TaskPayload(
+            type="write_test",
+            summary="Test the feature",
+            target_module="src/feature.py",
+            coverage_goal=80,
+        ),
+    )
+    registry.submit_task(task_e)
+
+    # Save handoff for task D so the worker packet can inline it
+    registry.save_handoff_result(HandoffResult(
+        task_id="task-with-quality",
+        plan_id="plan-e2e",
+        agent_id="claude-code",
+        changed_files=["src/feature.py", "src/models.py"],
+        risks=["manual browser check still pending"],
+    ))
+
+    # Claim and start task E
+    registry.claim_next_task(agent_id="qoder", capability="write_test")
+    registry.start_task("task-downstream", "qoder")
+
+    worker_pkt_e = registry.prepare_worker_packet("task-downstream", agent_id="qoder")
+    check(
+        "Upstream Handoff: task-with-quality" in worker_pkt_e,
+        "B-2: Worker packet inlines upstream handoff header",
+    )
+    check(
+        "src/feature.py" in worker_pkt_e,
+        "B-2: Worker packet shows upstream changed files",
+    )
+    check(
+        "manual browser check" in worker_pkt_e,
+        "B-2: Worker packet shows upstream risks",
+    )
+
+    # ------------------------------------------------------------------
+    banner("Step 16 [B-3]: TTL expiry recovers stuck tasks")
+    # ------------------------------------------------------------------
+    # Submit a task with very short TTL, then simulate it being stuck
+    task_stuck = TaskTransfer(
+        task_id="task-stuck",
+        plan_id="plan-e2e",
+        source_agent_id="planner",
+        payload=TaskPayload(type="write_code", summary="Task that will expire"),
+        ttl_seconds=1,  # 1 second TTL
+    )
+    registry.submit_task(task_stuck)
+    registry.claim_next_task(agent_id="claude-code", capability="write_code")
+    registry.start_task("task-stuck", "claude-code")
+
+    # Wait for TTL to pass
+    time.sleep(2)
+
+    expired = registry.expire_stale_tasks()
+    expired_ids = {t.task_id for t in expired}
+    check("task-stuck" in expired_ids, "B-3: Stuck task expired via TTL")
+    # Verify the expired task is now failed
+    stuck_task = registry.ledger.get_task_transfer("task-stuck")
+    check(stuck_task is not None, "B-3: Expired task still exists in ledger")
+    check(stuck_task.status == "failed", "B-3: Expired task status is failed")
+    check(stuck_task.error_code == "TTL_EXPIRED", "B-3: Error code is TTL_EXPIRED")
+
+    # ------------------------------------------------------------------
+    banner("Step 17 [B-5]: Reviewer capability validation")
+    # ------------------------------------------------------------------
+    # Create a separate registry with reviewer_capability set
+    db_cap = ROOT / "mac_e2e_cap.db"
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(f"{db_cap}{suffix}")
+        if p.exists():
+            p.unlink()
+
+    cap_registry = Registry(
+        SQLiteTaskLedger(db_cap),
+        policy=CoordinationPolicy(require_review=True, reviewer_capability="review_code"),
+    )
+
+    # Register agents — one with review_code, one without
+    cap_registry.register(AgentCard(
+        agent_id="good-reviewer",
+        name="Good Reviewer",
+        capabilities=[AgentCapability(name="review_code")],
+    ))
+    cap_registry.register(AgentCard(
+        agent_id="bad-reviewer",
+        name="Bad Reviewer",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    cap_registry.register(AgentCard(
+        agent_id="worker",
+        name="Worker",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+
+    # Submit + claim + start + mark_review_ready
+    cap_registry.submit_task(TaskTransfer(
+        task_id="cap-task",
+        payload=TaskPayload(type="write_code", summary="Capability test"),
+    ))
+    cap_registry.claim_next_task(agent_id="worker", capability="write_code")
+    cap_registry.start_task("cap-task", "worker")
+    cap_registry.mark_review_ready("cap-task", "worker")
+
+    # Bad reviewer should be blocked
+    try:
+        cap_registry.accept_review("cap-task", reviewer_id="bad-reviewer")
+        check(False, "B-5: Bad reviewer should have been blocked")
+    except Exception as exc:
+        check("lacks capability" in str(exc), "B-5: Bad reviewer blocked with capability error")
+
+    # Good reviewer should succeed
+    result = cap_registry.accept_review("cap-task", reviewer_id="good-reviewer")
+    check(result.status == "completed", "B-5: Good reviewer accepted successfully")
+
+    # Clean up capability test DB
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(f"{db_cap}{suffix}")
+        if p.exists():
+            p.unlink()
+
     # ------------------------------------------------------------------
     banner("ALL E2E CHECKS PASSED")
     # ------------------------------------------------------------------
@@ -275,7 +457,7 @@ def main() -> None:
     - claude-code (write_code, src/**)
     - qoder       (write_test, tests/**)
 
-  Confirmed MAC v0.4.0 capabilities:
+  Confirmed MAC v0.5.0 capabilities:
     [OK] Multi-agent registration with distinct capabilities + path boundaries
     [OK] Plan lifecycle (draft -> active)
     [OK] Dependency blocking + unlock on upstream completion
@@ -287,6 +469,10 @@ def main() -> None:
     [OK] Cross-agent handoff reading (Qoder reads Claude's handoff)
     [OK] Trace metrics aggregation (6 indicators)
     [OK] Per-trace audit trail
+    [OK] B-1: Review packet includes quality evidence summary
+    [OK] B-2: Worker packet inlines upstream handoff for completed deps
+    [OK] B-3: TTL expiry recovers stuck tasks (failed + TTL_EXPIRED)
+    [OK] B-5: Reviewer capability validation gates accept/reject
 """)
 
 
