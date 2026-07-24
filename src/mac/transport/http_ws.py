@@ -84,6 +84,12 @@ class DoneTaskRequest(BaseModel):
     risks: list[str] | None = None
 
 
+class CleanupTasksRequest(BaseModel):
+    statuses: list[str] | None = None
+    plan_id: str | None = None
+    older_than_seconds: float | None = None
+
+
 def create_app(registry: Registry) -> FastAPI:
     app = FastAPI(title="Multi-Agent Coordinator")
 
@@ -338,6 +344,17 @@ def create_app(registry: Registry) -> FastAPI:
     def expire_stale_tasks(auto_retry: bool = False) -> list[TaskTransfer]:
         """Transition non-terminal tasks past their TTL to failed, or auto-retry."""
         return registry.expire_stale_tasks(auto_retry=auto_retry)
+
+    @app.post("/tasks/cleanup")
+    def cleanup_tasks(request: CleanupTasksRequest | None = None) -> list[TaskTransfer]:
+        """Delete terminal tasks (failed/cancelled/rejected/superseded)."""
+        if request is None:
+            request = CleanupTasksRequest()
+        return registry.cleanup_tasks(
+            statuses=request.statuses,
+            plan_id=request.plan_id,
+            older_than_seconds=request.older_than_seconds,
+        )
 
     @app.post("/agents/{agent_id}/next")
     def next_task(agent_id: str, request: ClaimTaskRequest) -> Response:

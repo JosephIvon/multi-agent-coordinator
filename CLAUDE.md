@@ -26,7 +26,7 @@ src/mac/
 ├── quality/gate.py         # 质量门
 ├── runner/                 # 本地 adapter(命令/Pytest 模板)
 ├── transport/http_ws.py    # FastAPI app(仅 http extra)
-├── mcp_server.py           # MCP Server(15 tools + 2 resources,仅 mcp extra)
+├── mcp_server.py           # MCP Server(16 tools + 2 resources,仅 mcp extra)
 ├── metrics.py              # 可观测性聚合(6 指标)
 ├── events.py               # TaskEventBus
 └── cli.py                  # CLI 子命令
@@ -116,7 +116,7 @@ src/mac/
 
 ## 9. MCP Server 指引
 
-AI 编码工具通过 MCP 接入 MAC,15 tools + 2 resources:
+AI 编码工具通过 MCP 接入 MAC,16 tools + 2 resources:
 
 | Tool | 作用 | 副作用 |
 |------|------|--------|
@@ -135,6 +135,7 @@ AI 编码工具通过 MCP 接入 MAC,15 tools + 2 resources:
 | `mac_reject_review` | review_ready → rejected(自动记录冲突) | 写 |
 | `mac_expire_stale_tasks` | 过期 TTL 任务 → failed | 写 |
 | `mac_expire_stale_agents` | 心跳超时 agent → offline | 写 |
+| `mac_cleanup_tasks` | 删除终态任务(failed/cancelled/rejected/superseded) | 写 |
 
 Resources: `mac://capabilities`(能力清单), `mac://health`(健康状态)。
 

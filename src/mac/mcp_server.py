@@ -150,7 +150,7 @@ def mac_record_quality_and_complete(
         quality_results = reg.ledger.get_quality_results(task_id)
         allowed, reason = evaluate_quality_gate(task.test_contract, quality_results)
         if allowed:
-            completed = reg.complete_task(task_id, agent_id)
+            reg.complete_task(task_id, agent_id)
             return {"status": "completed", "task_id": task_id, "reason": reason}
         return {"status": "running", "task_id": task_id, "reason": reason}
 

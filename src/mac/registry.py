@@ -10,12 +10,12 @@ from uuid import uuid4
 from mac.events import TaskEvent, TaskEventBus
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
+    AuditEntry,
     ConflictRecord,
     CoordinationPolicy,
     HandoffResult,
     PathRule,
     Plan,
-    AuditEntry,
     QualityGatePreview,
     TaskEvidenceBundle,
     TaskReadinessReport,
@@ -56,10 +56,7 @@ class Registry:
         updates: dict[str, Any] = {"status": status, "last_heartbeat": time.time()}
         if load is not None:
             updates["load"] = load
-        if hasattr(agent, "model_copy"):
-            refreshed = agent.model_copy(update=updates)
-        else:
-            refreshed = replace(agent, **updates)
+        refreshed = agent.model_copy(update=updates) if hasattr(agent, "model_copy") else replace(agent, **updates)
         self.ledger.save_agent_card(refreshed)
         return refreshed
 

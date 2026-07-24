@@ -11,7 +11,6 @@ from mac.protocol.messages import AgentCapability, AgentCard, TaskTransfer
 from mac.registry import Registry
 from mac.runner.local import LocalAgentRunner, TaskRunResult, command_task_handler
 
-
 TaskHandler = Callable[[TaskTransfer], TaskRunResult | dict[str, Any]]
 
 

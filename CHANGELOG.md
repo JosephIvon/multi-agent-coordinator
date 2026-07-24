@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] — 2026-07-24
+
+### Added
+
+- **P0-1**: `TestContract.for_risk()` supports `custom_commands` and `custom_evidence` parameters to override hardcoded pytest commands and evidence names — enables quality gates for non-Python projects (e.g. `vue-tsc`, `biome check`)
+- **P0-1**: `mac-agent contract --custom-command` and `--custom-evidence` CLI flags
+- **P0-1**: `mac-agent submit --custom-command` and `--custom-evidence` CLI flags
+- **P1-1**: `mac-agent submit --spec-json` CLI flag for structured task specs stored in `task.metadata.spec`
+- **P1-1**: Worker packet renders `## Structured Spec` section from `task.metadata.spec`
+- **P1-2**: `Registry.cleanup_tasks()` method to delete terminal tasks (failed/cancelled/rejected/superseded) with optional status, plan, and age filters
+- **P1-2**: `mac-agent cleanup` CLI subcommand
+- **P1-2**: `mac_cleanup_tasks` MCP tool (16th tool)
+- **P1-2**: `POST /tasks/cleanup` HTTP endpoint
+- Ruff linter configuration (`[tool.ruff]`) with E/W/F/UP/B/SIM/I/RUF100 rules
+- MyPy type checker configuration (`[tool.mypy]`)
+- Coverage configuration (`[tool.coverage]`) with 70% minimum threshold
+- Pre-commit hooks configuration (`.pre-commit-config.yaml`) with ruff + trailing-whitespace + end-of-file-fixer
+- `ruff`, `mypy`, `pytest-cov` added to `[dev]` extra dependencies
+
+### Changed
+
+- **P0-2**: Windows CLI `STATUS_STACK_BUFFER_OVERRUN` mitigation via `threading.stack_size(8MB)` in `__main__`
+- CI lint job upgraded from `import mac` check to `ruff check` + `mypy`
+- CI test job now collects coverage via `pytest-cov` and uploads `coverage.xml` artifact
+- Publish workflow migrated from API token to PyPI Trusted Publishing (OIDC)
+- SPEC.md updated: 15 → 16 MCP tools
+- README.md updated: 15 → 16 MCP tools
+- CLAUDE.md updated: K-002 status → ✅已修, 15 → 16 tools
+- Test count: ~251 → ~261
+
 ## [0.7.0] — 2026-07-23
 
 ### Added

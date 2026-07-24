@@ -21,7 +21,6 @@ from typing import Any
 
 from mac.storage.sqlite import SQLiteTaskLedger
 
-
 _METRIC_VERSION = "1.0"
 
 

@@ -18,9 +18,10 @@ def evaluate_quality_gate(
     if not passed_results:
         return False, "no_passed_results"
 
-    if getattr(contract, "allow_manual_override", False):
-        if any(result.get("manual_override") is True for result in results):
-            return True, None
+    if getattr(contract, "allow_manual_override", False) and any(
+        result.get("manual_override") is True for result in results
+    ):
+        return True, None
 
     commands = set(getattr(contract, "required_commands", []) or contract.recommended_commands)
     if commands:

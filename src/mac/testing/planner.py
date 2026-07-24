@@ -6,7 +6,6 @@ from pathlib import PurePosixPath
 
 from mac.testing.contracts import RiskLevel, TestContract
 
-
 _HIGH_RISK_SIGNALS = (
     "auth/",
     "/auth/",
@@ -61,10 +60,7 @@ def _normalize_path(path: str) -> str:
 
 
 def _has_high_risk_signal(path: str) -> bool:
-    for signal in _HIGH_RISK_SIGNALS:
-        if signal in path:
-            return True
-    return False
+    return any(signal in path for signal in _HIGH_RISK_SIGNALS)
 
 
 def _is_docs_file(path: str) -> bool:

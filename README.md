@@ -202,7 +202,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (15)
+### Available Tools (16)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -221,6 +221,7 @@ claude mcp add mac -- mac-mcp-server
 | `mac_reject_review` | Reject reviewed task → rejected (auto-records conflict) | write |
 | `mac_expire_stale_tasks` | Expire non-terminal tasks past TTL → failed | write |
 | `mac_expire_stale_agents` | Set offline agents with stale heartbeats | write |
+| `mac_cleanup_tasks` | Delete terminal tasks (failed/cancelled/rejected/superseded) | write |
 
 ### Available Resources (2)
 

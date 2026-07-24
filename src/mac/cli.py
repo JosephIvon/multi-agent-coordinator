@@ -4,8 +4,8 @@ import argparse
 import json
 import logging
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 logger = logging.getLogger("mac")
 
@@ -347,6 +347,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "submit":
+        from typing import Any
+
         from mac.protocol.messages import ContextBundle, TaskPayload, TaskTransfer
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
@@ -770,9 +772,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "dashboard":
+        from mac.metrics import compute_metrics, format_table
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
-        from mac.metrics import compute_metrics, format_table
 
         reg = Registry(SQLiteStorage(Path(args.db)))
 
@@ -797,7 +799,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ready = reg.list_ready_tasks()
         running = [t for t in all_tasks if t.status == "running"]
         review_ready = [t for t in all_tasks if t.status == "review_ready"]
-        print(f"\nTasks:")
+        print("\nTasks:")
         print(f"  {len(ready)} ready to claim")
         print(f"  {len(running)} in-flight (running)")
         if review_ready:
@@ -806,7 +808,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Agents
         agents = reg.discover()
         online = [a for a in agents if a.status == "online"]
-        print(f"\nAgents:")
+        print("\nAgents:")
         print(f"  {len(online)} online" + (f" ({', '.join(a.agent_id for a in online)})" if online else ""))
 
         # Conflicts
@@ -822,7 +824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Metrics
         metrics = compute_metrics(reg.ledger)
         m = metrics
-        print(f"\nMetrics:")
+        print("\nMetrics:")
         print(f"  cycle_time   {m.get('task_cycle_time_seconds', 0):.2f}s  |  "
               f"handoff_rate  {m.get('handoff_success_rate', 0):.0%}  |  "
               f"quality_rate  {m.get('quality_gate_pass_rate', 0):.0%}")

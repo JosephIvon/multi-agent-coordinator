@@ -4,7 +4,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 RiskLevel = Literal["low", "medium", "high"]
 
 
@@ -34,10 +33,7 @@ class TestContract(BaseModel):
             recommended = list(_COMMANDS_BY_RISK[risk])
             required = list(_REQUIRED_COMMANDS_BY_RISK[risk])
 
-        if custom_evidence is not None:
-            evidence = list(custom_evidence)
-        else:
-            evidence = list(_EVIDENCE_BY_RISK[risk])
+        evidence = list(custom_evidence) if custom_evidence is not None else list(_EVIDENCE_BY_RISK[risk])
 
         return cls(
             risk_level=risk,
