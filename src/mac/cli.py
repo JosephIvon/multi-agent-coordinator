@@ -18,6 +18,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     contract = subcommands.add_parser("contract", help="Generate a risk-based test contract")
     contract.add_argument("--risk", choices=["low", "medium", "high"], required=True)
+    contract.add_argument("--custom-command", action="append", default=[], help="Override default commands (repeatable)")
+    contract.add_argument("--custom-evidence", action="append", default=[], help="Override default evidence names (repeatable)")
 
     register = subcommands.add_parser("register", help="Register an agent in the local ledger")
     register.add_argument("--db", default="mac.db")
@@ -48,6 +50,9 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--context-ref", action="append", default=[])
     submit.add_argument("--plan-id")
     submit.add_argument("--depends-on", action="append", default=[])
+    submit.add_argument("--custom-command", action="append", default=[], help="Custom verification commands for test contract (repeatable)")
+    submit.add_argument("--custom-evidence", action="append", default=[], help="Custom evidence names for test contract (repeatable)")
+    submit.add_argument("--spec-json", help="Structured spec as JSON string (stored in task.metadata.spec)")
 
     status = subcommands.add_parser("status", help="Print task status")
     status.add_argument("--db", default="mac.db")
@@ -224,6 +229,12 @@ def _build_parser() -> argparse.ArgumentParser:
     expire_agents.add_argument("--db", default="mac.db")
     expire_agents.add_argument("--timeout", type=int, default=None, help="Timeout in seconds (default: from policy)")
 
+    cleanup = subcommands.add_parser("cleanup", help="Delete terminal tasks (failed/cancelled/rejected/superseded)")
+    cleanup.add_argument("--db", default="mac.db")
+    cleanup.add_argument("--status", action="append", default=[], help="Status to clean (repeatable, default: failed,cancelled,rejected,superseded)")
+    cleanup.add_argument("--plan-id", help="Only clean tasks in this plan")
+    cleanup.add_argument("--older-than", type=int, default=None, help="Only clean tasks older than N seconds")
+
     dashboard = subcommands.add_parser("dashboard", help="Show project overview: plans, tasks, agents, conflicts, metrics")
     dashboard.add_argument("--db", default="mac.db")
 
@@ -294,7 +305,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "contract":
         from mac.testing.contracts import TestContract
 
-        _print_json(TestContract.for_risk(args.risk).model_dump())
+        custom_commands = args.custom_command or None
+        custom_evidence = args.custom_evidence or None
+        _print_json(
+            TestContract.for_risk(
+                args.risk,
+                custom_commands=custom_commands,
+                custom_evidence=custom_evidence,
+            ).model_dump()
+        )
         return 0
 
     if args.command == "register":
@@ -340,6 +359,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             coverage_goal=args.coverage_goal,
             risk_level=args.risk,
         )
+        custom_commands = args.custom_command or None
+        custom_evidence = args.custom_evidence or None
+        metadata: dict[str, Any] = {}
+        if args.spec_json:
+            try:
+                metadata["spec"] = json.loads(args.spec_json)
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.error("Invalid --spec-json: %s", exc)
+                return 1
         task = TaskTransfer(
             task_id=args.task_id,
             trace_id=args.trace_id or args.task_id,
@@ -347,9 +375,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             target_agent_id=args.target_agent_id,
             payload=payload,
             context=ContextBundle(summary=args.summary, artifact_refs=args.context_ref),
-            test_contract=TestContract.for_risk(args.risk) if args.risk else None,
+            test_contract=TestContract.for_risk(
+                args.risk,
+                custom_commands=custom_commands,
+                custom_evidence=custom_evidence,
+            ) if args.risk else None,
             plan_id=args.plan_id,
             depends_on=args.depends_on,
+            metadata=metadata,
         )
         registry = Registry(SQLiteStorage(Path(args.db)))
         _print_json(registry.submit_task(task).model_dump(mode="json"))
@@ -717,6 +750,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             logger.info("No stale agents found.")
         return 0
 
+    if args.command == "cleanup":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        statuses = args.status or None
+        older_than = args.older_than
+        deleted = Registry(SQLiteStorage(Path(args.db))).cleanup_tasks(
+            statuses=statuses,
+            plan_id=args.plan_id,
+            older_than_seconds=float(older_than) if older_than is not None else None,
+        )
+        if deleted:
+            for task in deleted:
+                logger.info("Deleted: %s (%s)", task.task_id, task.status)
+        else:
+            logger.info("No terminal tasks to clean up.")
+        _print_json({"deleted_count": len(deleted)})
+        return 0
+
     if args.command == "dashboard":
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
@@ -862,4 +914,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    import sys
+
+    if sys.platform == "win32":
+        try:
+            import threading
+
+            threading.stack_size(8 * 1024 * 1024)
+        except (ValueError, threading.ThreadError):
+            pass
+
     raise SystemExit(main())

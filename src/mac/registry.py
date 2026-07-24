@@ -637,6 +637,42 @@ class Registry:
     ) -> list[ConflictRecord]:
         return self.ledger.list_conflicts(plan_id=plan_id, resolved=resolved)
 
+    def cleanup_tasks(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        plan_id: str | None = None,
+        older_than_seconds: float | None = None,
+    ) -> list[TaskTransfer]:
+        """Delete terminal tasks (failed/cancelled/rejected/superseded) from the ledger.
+
+        :param statuses: Task statuses to clean up. Defaults to
+            ``["failed", "cancelled", "rejected", "superseded"]``.
+        :param plan_id: Only clean tasks belonging to this plan.
+        :param older_than_seconds: Only clean tasks whose ``updated_at``
+            is older than this many seconds. ``None`` means no age filter.
+        :returns: List of deleted TaskTransfer objects.
+        """
+        if statuses is None:
+            statuses = ["failed", "cancelled", "rejected", "superseded"]
+        candidates: list[TaskTransfer] = []
+        for status in statuses:
+            candidates.extend(self.ledger.list_task_transfers(status=status))
+        now = time.time()
+        deleted: list[TaskTransfer] = []
+        for task in candidates:
+            if plan_id is not None and task.plan_id != plan_id:
+                continue
+            if older_than_seconds is not None:
+                updated = _parse_iso_to_epoch(task.updated_at or task.created_at)
+                if updated is not None and (now - updated) < older_than_seconds:
+                    continue
+            self.ledger.delete_task_transfer(task.task_id)
+            self._audit(task, "cleanup_task", "system", from_status=task.status, to_status="deleted")
+            self._publish(task, "task_cleaned_up", actor="system", from_status=task.status, to_status="deleted")
+            deleted.append(task)
+        return deleted
+
     def resolve_conflict(self, conflict_id: str, resolution: str) -> ConflictRecord:
         resolved = self.ledger.resolve_conflict(conflict_id, resolution)
         self._publish_conflict(resolved, "conflict_resolved")
@@ -692,6 +728,19 @@ class Registry:
         )
         criteria = list(getattr(task.context, "acceptance_criteria", []) or [])
         lines.extend([f"- {item}" for item in criteria] or ["- Complete the task and submit structured handoff evidence."])
+        spec = (task.metadata or {}).get("spec")
+        if spec is not None:
+            lines.extend(
+                [
+                    "",
+                    "## Structured Spec",
+                ]
+            )
+            if isinstance(spec, dict):
+                for key, value in spec.items():
+                    lines.append(f"- **{key}**: {value}")
+            else:
+                lines.append(str(spec))
         lines.extend(
             [
                 "",

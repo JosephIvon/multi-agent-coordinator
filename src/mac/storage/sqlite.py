@@ -149,6 +149,15 @@ class SQLiteTaskLedger:
         )
         return [_from_dict("TaskTransfer", json.loads(row["payload"])) for row in rows]
 
+    def delete_task_transfer(self, task_id: str) -> bool:
+        """Delete a task transfer row. Returns True if a row was deleted."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM task_transfers WHERE task_id = ?",
+                (task_id,),
+            )
+            return cursor.rowcount > 0
+
     def save_plan(self, plan: Any) -> None:
         data = _to_dict(plan)
         with self._connect() as conn:

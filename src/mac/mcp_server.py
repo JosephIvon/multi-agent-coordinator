@@ -437,6 +437,35 @@ def mac_expire_stale_agents(timeout_seconds: int | None = None) -> str:
     return _safe_call(_do)
 
 
+@mcp.tool()
+def mac_cleanup_tasks(
+    statuses: list[str] | None = None,
+    plan_id: str | None = None,
+    older_than_seconds: float | None = None,
+) -> str:
+    """Delete terminal tasks (failed/cancelled/rejected/superseded) from the ledger.
+
+    Useful for removing completed-but-failed tasks that clutter the dashboard.
+    Deleted tasks are recorded in the audit trail.
+
+    :param statuses: Task statuses to clean up. Defaults to
+        ``["failed", "cancelled", "rejected", "superseded"]``.
+    :param plan_id: Only clean tasks belonging to this plan.
+    :param older_than_seconds: Only clean tasks whose updated_at is older
+        than this many seconds. None means no age filter.
+    :returns: JSON array of deleted TaskTransfer objects.
+    """
+
+    def _do() -> Any:
+        return _registry().cleanup_tasks(
+            statuses=statuses,
+            plan_id=plan_id,
+            older_than_seconds=older_than_seconds,
+        )
+
+    return _safe_call(_do)
+
+
 # ---------------------------------------------------------------------------
 # Resources (2)
 # ---------------------------------------------------------------------------

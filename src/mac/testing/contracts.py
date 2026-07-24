@@ -18,15 +18,32 @@ class TestContract(BaseModel):
     allow_manual_override: bool = False
 
     @classmethod
-    def for_risk(cls, risk_level: RiskLevel) -> TestContract:
-        contract = cls(risk_level=risk_level)
-        risk = contract.risk_level
+    def for_risk(
+        cls,
+        risk_level: RiskLevel,
+        *,
+        custom_commands: list[str] | None = None,
+        custom_evidence: list[str] | None = None,
+    ) -> TestContract:
+        risk = risk_level
+
+        if custom_commands is not None:
+            recommended = list(custom_commands)
+            required = list(custom_commands)
+        else:
+            recommended = list(_COMMANDS_BY_RISK[risk])
+            required = list(_REQUIRED_COMMANDS_BY_RISK[risk])
+
+        if custom_evidence is not None:
+            evidence = list(custom_evidence)
+        else:
+            evidence = list(_EVIDENCE_BY_RISK[risk])
 
         return cls(
             risk_level=risk,
-            recommended_commands=list(_COMMANDS_BY_RISK[risk]),
-            required_commands=list(_REQUIRED_COMMANDS_BY_RISK[risk]),
-            required_evidence=list(_EVIDENCE_BY_RISK[risk]),
+            recommended_commands=recommended,
+            required_commands=required,
+            required_evidence=evidence,
         )
 
 
