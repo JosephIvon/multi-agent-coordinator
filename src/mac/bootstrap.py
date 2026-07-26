@@ -25,15 +25,16 @@ and write results back with MAC CLI, MCP, or authenticated HTTP callbacks.
 MCP = {"mcpServers": {"mac": {"command": "mac-mcp-server", "args": [], "env": {"MAC_DB_PATH": "mac.db"}}}}
 
 
-def _managed(path: Path, content: str = ENTRY) -> None:
+def _managed(path: Path, content: str = ENTRY, *, header: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     if BEGIN in existing and END in existing:
         prefix, rest = existing.split(BEGIN, 1)
         _, suffix = rest.split(END, 1)
-        rendered = prefix.rstrip() + "\n\n" + content.rstrip() + suffix
+        prefix = prefix.rstrip()
+        rendered = (prefix + "\n\n" if prefix else "") + content.rstrip() + suffix
     else:
-        rendered = existing.rstrip() + ("\n\n" if existing.strip() else "") + content
+        rendered = existing.rstrip() + ("\n\n" if existing.strip() else "") + header + content
     path.write_text(rendered.rstrip() + "\n", encoding="utf-8")
 
 
@@ -51,7 +52,7 @@ def bootstrap_project(root: str | Path) -> list[Path]:
     ]
     for path in text_entries:
         prefix = "---\ndescription: MAC coordination entry point\nalwaysApply: true\n---\n\n" if path.suffix == ".mdc" else ""
-        _managed(path, prefix + ENTRY)
+        _managed(path, ENTRY, header=prefix)
     configs = {
         root / ".mcp.json": MCP,                         # Claude Code
         root / ".cursor" / "mcp.json": MCP,           # Cursor
