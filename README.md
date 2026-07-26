@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 0.7.0 | **License:** MIT
+**Version:** 1.0.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -12,7 +12,7 @@ It is useful when you use several AI coding tools in the same project and need o
 - What conflicts or path-boundary issues need human review?
 - What prompt packet should I give to the next worker or reviewer agent?
 
-MAC is not an execution engine. It does not run Claude, Codex, Trae, GLM, or other agents for you. It coordinates their work through a local SQLite ledger and CLI/HTTP/API surfaces.
+MAC is coordination-first. Generic CLI/HTTP adapters can dispatch work while durable task, session, blocker, and handoff truth remains in one SQLite ledger exposed through CLI, MCP, and authenticated HTTP surfaces.
 
 ---
 
@@ -350,3 +350,44 @@ python examples/local_runner.py
 python examples/collaboration_plan.py
 python -m compileall -q src examples scripts
 ```
+
+## IDE-agnostic adapters
+
+MAC core does not contain vendor-specific branches for Codex, Claude, Trae, Qoder, WorkBuddy, Cursor, OpenCode, or future tools. Coding tools are adapters selected by capability, not by brand. The built-in `generic-context` adapter works with any tool that can read a Markdown file; third-party adapters can be installed independently through the `mac.adapters` Python entry-point group.
+
+An adapter should expose a manifest and implement `prepare_context(...)`. Optional dispatch, callbacks, MCP, and process-control capabilities can be added without changing the ledger or task protocol:
+
+```toml
+[project.entry-points."mac.adapters"]
+my-ide = "my_mac_adapter:Adapter"
+```
+
+Use the portable context directory as the compatibility boundary:
+
+```text
+.agent-context/
+  current-task.md
+  project-state.json
+  decisions.md
+  handoffs/
+```
+
+This keeps one MAC source of truth while allowing new IDE integrations to be added as separate packages.
+
+
+## Production delivery: HTTP, sessions, and IDE bootstrap
+
+```bash
+pip install "mac-agent[http,mcp]==1.0.0"
+mac-agent bootstrap --project-root .
+mac-http-server
+```
+
+Configure the HTTP authentication and database environment variables before
+starting the server. Remote callbacks are bound to durable agent sessions and
+stable event IDs: exact replays are idempotent and conflicting payloads return
+HTTP 409. Results may be `completed`, `failed`, or `blocked`; blocked results
+create a durable blocker and optional handoff target.
+
+See [Installation](docs/INSTALL.md), [IDE and remote integrations](docs/INTEGRATIONS.md),
+and the [remote callback example](examples/remote_callback.py).

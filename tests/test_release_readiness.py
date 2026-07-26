@@ -5,12 +5,11 @@ try:
 except ImportError:  # pragma: no cover - exercised only on Python 3.10
     import tomli as tomllib
 
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import mac
-
 
 ROOT = Path(__file__).resolve().parents[1]
 

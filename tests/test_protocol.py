@@ -1,6 +1,7 @@
-from pydantic import ValidationError
 import pytest
+from pydantic import ValidationError
 
+from mac.protocol.constants import ERROR_CODES, RISK_LEVELS, TASK_STATUSES
 from mac.protocol.messages import (
     AgentCapability,
     AgentCard,
@@ -8,7 +9,6 @@ from mac.protocol.messages import (
     TaskPayload,
     TaskTransfer,
 )
-from mac.protocol.constants import TASK_STATUSES, RISK_LEVELS, ERROR_CODES
 
 
 def test_model_defaults_do_not_share_mutable_values():

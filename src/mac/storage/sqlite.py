@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from mac.protocol.messages import AuditEntry
@@ -385,6 +385,95 @@ class SQLiteTaskLedger:
             ),
         )
 
+    def save_session(self, session: Any) -> Any:
+        data = _to_dict(session)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO sessions
+                   (session_id, agent_id, task_id, status, last_heartbeat, payload, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(session_id) DO UPDATE SET
+                     agent_id=excluded.agent_id, task_id=excluded.task_id,
+                     status=excluded.status, last_heartbeat=excluded.last_heartbeat,
+                     payload=excluded.payload, updated_at=excluded.updated_at""",
+                (data["session_id"], data["agent_id"], data.get("task_id"),
+                 data.get("status", "registered"), float(data.get("last_heartbeat", 0)),
+                 _json(data), _now()),
+            )
+        return session
+
+    def get_session(self, session_id: str) -> Any | None:
+        row = self._fetch_one("SELECT payload FROM sessions WHERE session_id = ?", session_id)
+        if row is None:
+            return None
+        from mac.adapters.lifecycle import SessionState
+        return SessionState.from_dict(json.loads(row["payload"]))
+
+    def list_sessions(self, *, agent_id: str | None = None, task_id: str | None = None,
+                      status: str | None = None) -> list[Any]:
+        clauses, params = [], []
+        for column, value in (("agent_id", agent_id), ("task_id", task_id), ("status", status)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetch_all(f"SELECT payload FROM sessions {where} ORDER BY updated_at DESC", *params)
+        from mac.adapters.lifecycle import SessionState
+        return [SessionState.from_dict(json.loads(row["payload"])) for row in rows]
+
+    def claim_callback(self, event_id: str, payload_hash: str) -> str:
+        """Atomically claim a callback event: new, duplicate, or conflict."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT payload_hash FROM callback_events WHERE event_id = ?", (event_id,)).fetchone()
+            if row is not None:
+                return "duplicate" if row["payload_hash"] == payload_hash else "conflict"
+            conn.execute(
+                "INSERT INTO callback_events(event_id, payload_hash, status, created_at) VALUES (?, ?, 'processing', ?)",
+                (event_id, payload_hash, _now()),
+            )
+            return "new"
+
+    def abort_callback(self, event_id: str) -> None:
+        """Release an event claim when processing made no durable result."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM callback_events WHERE event_id = ? AND status = 'processing'", (event_id,))
+
+    def finish_callback(self, event_id: str, response: dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE callback_events SET status='completed', response=?, completed_at=? WHERE event_id=?",
+                         (_json(response), _now(), event_id))
+
+    def get_callback(self, event_id: str) -> dict[str, Any] | None:
+        row = self._fetch_one("SELECT status, response FROM callback_events WHERE event_id = ?", event_id)
+        if row is None:
+            return None
+        return {"event_id": event_id, "status": row["status"],
+                "response": json.loads(row["response"]) if row["response"] else None}
+
+    def save_blocker(self, blocker: Any) -> Any:
+        data = _to_dict(blocker)
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO blockers(blocker_id, task_id, status, payload, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(blocker_id) DO UPDATE SET status=excluded.status,
+                     payload=excluded.payload, updated_at=excluded.updated_at""",
+                (data["blocker_id"], data["task_id"], data.get("status", "open"), _json(data), _now()),
+            )
+        return blocker
+
+    def list_blockers(self, *, task_id: str | None = None, status: str | None = None) -> list[Any]:
+        clauses, params = [], []
+        if task_id is not None:
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._fetch_all(f"SELECT payload FROM blockers {where} ORDER BY updated_at DESC", *params)
+        return [_from_dict("BlockerRecord", json.loads(row["payload"])) for row in rows]
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -511,6 +600,27 @@ class SQLiteTaskLedger:
                 )
                 """
             )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, task_id TEXT,
+                    status TEXT NOT NULL, last_heartbeat REAL NOT NULL DEFAULT 0,
+                    payload TEXT NOT NULL, updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS callback_events (
+                    event_id TEXT PRIMARY KEY, payload_hash TEXT NOT NULL, status TEXT NOT NULL,
+                    response TEXT, created_at TEXT NOT NULL, completed_at TEXT
+                )"""
+            )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS blockers (
+                    blocker_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, status TEXT NOT NULL,
+                    payload TEXT NOT NULL, updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON sessions(agent_id, task_id, status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_blockers_task ON blockers(task_id, status)")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_agent_discovery ON agent_cards(status, project_context, load)"
             )
@@ -653,7 +763,7 @@ def _to_dict(value: Any) -> dict[str, Any]:
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json")
     if is_dataclass(value):
-        return asdict(value)
+        return asdict(cast(Any, value))
     if isinstance(value, dict):
         return dict(value)
     raise TypeError(f"Cannot serialize {type(value)!r}")

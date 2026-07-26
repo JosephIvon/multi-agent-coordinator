@@ -137,7 +137,9 @@ def command_task_handler(
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
+            stdout = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+            stderr = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+            output = stdout + stderr
             return TaskRunResult.failed(command=command_text, error_code="COMMAND_TIMEOUT", output=output)
 
         output = (completed.stdout or "") + (completed.stderr or "")

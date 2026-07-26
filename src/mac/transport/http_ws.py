@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import os
+import time
+from dataclasses import replace
 from typing import Any
+from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel
 
+from mac.adapters.http import GenericHttpAdapter
+from mac.adapters.lifecycle import SessionState, utc_now
 from mac.metrics import compute_metrics
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
@@ -18,7 +26,46 @@ from mac.protocol.messages import (
     TaskTransfer,
 )
 from mac.registry import Registry
+from mac.security import token_matches
 
+
+class CreateSessionRequest(BaseModel):
+    session_id: str | None = None
+    agent_id: str
+    task_id: str | None = None
+    callback_url: str | None = None
+    metadata: dict[str, Any] = {}
+
+
+class SessionHeartbeatRequest(BaseModel):
+    status: str = "online"
+
+
+class AgentCallbackRequest(BaseModel):
+    session_id: str
+    task_id: str
+    agent_id: str
+    result: dict[str, Any]
+
+
+class BlockTaskRequest(BaseModel):
+    agent_id: str
+    reason: str
+    handoff_to: str | None = None
+    metadata: dict[str, Any] | None = None
+
+
+class ResumeBlockedRequest(BaseModel):
+    agent_id: str
+    resolution: str = ""
+
+
+class RemoteDispatchRequest(BaseModel):
+    agent_id: str
+    url: str
+    callback_url: str
+    token: str | None = None
+    timeout: float = 60
 
 class AgentActionRequest(BaseModel):
     agent_id: str
@@ -90,8 +137,18 @@ class CleanupTasksRequest(BaseModel):
     older_than_seconds: float | None = None
 
 
-def create_app(registry: Registry) -> FastAPI:
-    app = FastAPI(title="Multi-Agent Coordinator")
+def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
+    app = FastAPI(title="Multi-Agent Coordinator", version="0.9.0")
+    expected_token = token if token is not None else os.getenv("MAC_HTTP_TOKEN")
+
+    if expected_token:
+        @app.middleware("http")
+        async def authenticate(request: Request, call_next: Any) -> Response:
+            if request.url.path not in {"/", "/health"} and not token_matches(expected_token, request.headers.get("Authorization")):
+                return Response(content=json.dumps({"detail": "Invalid or missing bearer token"}),
+                                status_code=401, media_type="application/json",
+                                headers={"WWW-Authenticate": "Bearer"})
+            return await call_next(request)
 
     @app.get("/")
     def root() -> dict[str, str]:
@@ -371,6 +428,131 @@ def create_app(registry: Registry) -> FastAPI:
         packet = registry.prepare_worker_packet(claimed.task_id, agent_id=agent_id)
         return Response(content=packet, media_type="text/markdown")
 
+    @app.post("/sessions", status_code=201)
+    def create_session(request: CreateSessionRequest) -> Any:
+        if registry.get_agent(request.agent_id) is None:
+            raise HTTPException(status_code=404, detail=f"Agent {request.agent_id!r} not found")
+        if request.task_id and registry.get_task(request.task_id) is None:
+            raise HTTPException(status_code=404, detail=f"Task {request.task_id!r} not found")
+        now = time.time()
+        session = SessionState(agent_id=request.agent_id, session_id=request.session_id or str(uuid4()),
+                               task_id=request.task_id, status="online", callback_url=request.callback_url,
+                               last_heartbeat=now, metadata=request.metadata)
+        registry.ledger.save_session(session)
+        return session
+
+    @app.get("/sessions")
+    def list_sessions(agent_id: str | None = None, task_id: str | None = None,
+                      status: str | None = None) -> list[Any]:
+        return registry.ledger.list_sessions(agent_id=agent_id, task_id=task_id, status=status)
+
+    @app.get("/sessions/{session_id}")
+    def get_session(session_id: str) -> Any:
+        session = registry.ledger.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=session_id)
+        return session
+
+    @app.post("/sessions/{session_id}/heartbeat")
+    def heartbeat_session(session_id: str, request: SessionHeartbeatRequest) -> Any:
+        session = registry.ledger.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=session_id)
+        refreshed = replace(session, status=request.status, last_heartbeat=time.time(),
+                            updated_at=utc_now())
+        registry.ledger.save_session(refreshed)
+        return refreshed
+
+    @app.post("/sessions/expire-stale")
+    def expire_sessions(timeout_seconds: float = 300) -> list[Any]:
+        now = time.time()
+        expired = []
+        for session in registry.ledger.list_sessions(status="online"):
+            if session.last_heartbeat and now - session.last_heartbeat > timeout_seconds:
+                offline = replace(session, status="offline")
+                registry.ledger.save_session(offline)
+                expired.append(offline)
+        return expired
+
+    @app.post("/sessions/{session_id}/recover")
+    def recover_session(session_id: str) -> Any:
+        session = registry.ledger.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=session_id)
+        recovered = replace(session, status="online", last_heartbeat=time.time())
+        registry.ledger.save_session(recovered)
+        return recovered
+
+    @app.post("/tasks/{task_id}/blocked")
+    def block_task(task_id: str, request: BlockTaskRequest) -> TaskTransfer:
+        return _call_task(lambda: registry.block_task(task_id, agent_id=request.agent_id,
+            reason=request.reason, handoff_to=request.handoff_to, metadata=request.metadata))
+
+    @app.post("/tasks/{task_id}/resume")
+    def resume_task(task_id: str, request: ResumeBlockedRequest) -> TaskTransfer:
+        return _call_task(lambda: registry.resume_blocked_task(task_id, agent_id=request.agent_id,
+                                                               resolution=request.resolution))
+
+    @app.get("/tasks/{task_id}/blockers")
+    def list_blockers(task_id: str, status: str | None = None) -> list[Any]:
+        return registry.ledger.list_blockers(task_id=task_id, status=status)
+
+    @app.post("/callbacks/{event_id}")
+    def agent_callback(event_id: str, request: AgentCallbackRequest) -> dict[str, Any]:
+        session = registry.ledger.get_session(request.session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session.agent_id != request.agent_id or session.task_id != request.task_id:
+            raise HTTPException(status_code=403, detail="Callback identity does not match session")
+        canonical = json.dumps(request.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+        claim = registry.ledger.claim_callback(event_id, hashlib.sha256(canonical.encode()).hexdigest())
+        if claim == "conflict":
+            raise HTTPException(status_code=409, detail="Callback event id reused with a different payload")
+        if claim == "duplicate":
+            stored = registry.ledger.get_callback(event_id)
+            return {"event_id": event_id, "duplicate": True, "result": stored["response"] if stored else None}
+        if session.status == "completed":
+            registry.ledger.abort_callback(event_id)
+            raise HTTPException(status_code=409, detail="Session is already completed")
+        try:
+            result = _call_task(lambda: registry.apply_agent_result(request.task_id,
+                                                                    agent_id=request.agent_id,
+                                                                    result=request.result))
+        except Exception:
+            registry.ledger.abort_callback(event_id)
+            raise
+        completed = replace(session, status="completed", updated_at=utc_now())
+        registry.ledger.save_session(completed)
+        registry.ledger.finish_callback(event_id, result)
+        return {"event_id": event_id, "duplicate": False, "result": result}
+
+    @app.get("/callbacks/{event_id}")
+    def get_callback(event_id: str) -> dict[str, Any]:
+        event = registry.ledger.get_callback(event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail=event_id)
+        return event
+
+    @app.post("/tasks/{task_id}/dispatch")
+    def dispatch_remote(task_id: str, request: RemoteDispatchRequest) -> dict[str, Any]:
+        task = registry.get_task(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=task_id)
+        if task.status == "proposed":
+            registry.accept_handoff(task_id, request.agent_id)
+        if registry.get_task(task_id).status == "accepted":
+            registry.start_task(task_id, request.agent_id)
+        session = SessionState(agent_id=request.agent_id, session_id=str(uuid4()), task_id=task_id,
+                               status="online", callback_url=request.callback_url, last_heartbeat=time.time())
+        registry.ledger.save_session(session)
+        payload = {"task": registry.get_task(task_id).model_dump(mode="json"),
+                   "session_id": session.session_id, "callback_url": request.callback_url}
+        dispatched = GenericHttpAdapter().dispatch(request.url, payload, token=request.token, timeout=request.timeout)
+        if not 200 <= dispatched.status_code < 300:
+            registry.fail_task(task_id, request.agent_id, "REMOTE_DISPATCH_FAILED", dispatched.body)
+        return {"session": session.to_dict(), "status_code": dispatched.status_code,
+                "body": dispatched.body[-4000:]}
+
     @app.get("/ledger/{trace_id}")
     def get_ledger(trace_id: str) -> list[Any]:
         return registry.get_audit_trail(trace_id)
@@ -389,3 +571,15 @@ def _call_task(operation: Any) -> Any:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (QualityGateError, StateConflictError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def main() -> None:
+    """Run the authenticated HTTP service (loopback by default)."""
+    import uvicorn
+
+    from mac.storage import SQLiteTaskLedger
+
+    db_path = os.getenv("MAC_DB_PATH", "mac.db")
+    host = os.getenv("MAC_HTTP_HOST", "127.0.0.1")
+    port = int(os.getenv("MAC_HTTP_PORT", "8765"))
+    uvicorn.run(create_app(Registry(SQLiteTaskLedger(db_path))), host=host, port=port)

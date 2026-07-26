@@ -6,6 +6,7 @@ import logging
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal, cast
 
 logger = logging.getLogger("mac")
 
@@ -16,6 +17,37 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--quiet", action="store_true", help="Suppress non-error output")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
+    adapter = subcommands.add_parser("adapter", help="Discover and inspect IDE adapters")
+    adapter_subcommands = adapter.add_subparsers(dest="adapter_command", required=True)
+    adapter_subcommands.add_parser("list", help="List installed adapters")
+    adapter_inspect = adapter_subcommands.add_parser("inspect", help="Inspect an adapter manifest")
+    adapter_inspect.add_argument("adapter_id")
+    adapter_run = adapter_subcommands.add_parser("run", help="Run a task through a CLI adapter and sync its result")
+    adapter_run.add_argument("adapter_id", choices=["generic-cli"])
+    adapter_run.add_argument("--db", default="mac.db")
+    adapter_run.add_argument("--task-id", required=True)
+    adapter_run.add_argument("--agent-id", required=True)
+    adapter_run.add_argument("--command", dest="adapter_command_line", nargs=argparse.REMAINDER, required=True)
+    adapter_run.add_argument("--output-dir", default=".agent-context")
+    adapter_run.add_argument("--cwd")
+    adapter_run.add_argument("--timeout", type=float, default=3600)
+    adapter_run.add_argument("--quality-command")
+    adapter_run.add_argument("--quality-evidence", action="append", default=[])
+
+    context = subcommands.add_parser("context", help="Materialize a portable task context for an adapter")
+    context.add_argument("--db", default="mac.db")
+    context.add_argument("--task-id", required=True)
+    context.add_argument("--agent-id")
+    context.add_argument("--adapter", dest="adapter_id", default="generic-context")
+    context.add_argument("--output-dir", default=".agent-context")
+
+    bootstrap = subcommands.add_parser("bootstrap", help="Create tool-neutral project context files")
+    bootstrap.add_argument("--db", default="mac.db")
+    bootstrap.add_argument("--task-id")
+    bootstrap.add_argument("--agent-id")
+    bootstrap.add_argument("--adapter", dest="adapter_id", default="generic-context")
+    bootstrap.add_argument("--output-dir", default=".agent-context")
+    bootstrap.add_argument("--project-root", default=".")
     contract = subcommands.add_parser("contract", help="Generate a risk-based test contract")
     contract.add_argument("--risk", choices=["low", "medium", "high"], required=True)
     contract.add_argument("--custom-command", action="append", default=[], help="Override default commands (repeatable)")
@@ -287,7 +319,7 @@ def _parse_verification(value: str):
     from mac.protocol.messages import VerificationEntry
 
     command, result, description = (value.split(":", 2) + ["", ""])[:3]
-    return VerificationEntry(command=command, result=result, description=description)
+    return VerificationEntry(command=command, result=cast(Literal["pass", "fail"], result), description=description)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -302,6 +334,87 @@ def main(argv: Sequence[str] | None = None) -> int:
         level = logging.INFO
     logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
 
+    if args.command == "adapter":
+        from mac.adapters import discover_adapters
+
+        adapters = discover_adapters()
+        if args.adapter_command == "list":
+            _print_json([a.manifest.to_dict() for a in adapters.values()])
+            return 0
+        adapter = adapters.get(args.adapter_id)
+        if adapter is None:
+            logger.error("Unknown adapter: %s", args.adapter_id)
+            return 2
+        if args.adapter_command == "run":
+            from mac.adapters.generic import GenericCliAdapter
+            from mac.protocol.messages import HandoffResult
+            from mac.registry import Registry
+            from mac.storage.sqlite import SQLiteStorage
+            cli_adapter = cast(GenericCliAdapter, adapter)
+            registry = Registry(SQLiteStorage(Path(args.db)))
+            packet = registry.prepare_worker_packet(args.task_id, agent_id=args.agent_id)
+            prepared = adapter.prepare_context(task_id=args.task_id, context=packet, output_dir=Path(args.output_dir))
+            dispatch_result = cli_adapter.dispatch(prepared, args.adapter_command_line, cwd=args.cwd, timeout=args.timeout)
+            normalized = cli_adapter.normalize_result(dispatch_result)
+            if normalized.status == "completed":
+                handoff = HandoffResult(task_id=args.task_id, agent_id=args.agent_id, risks=[], changed_files=[])
+                synced = registry.done(
+                    args.task_id,
+                    args.agent_id,
+                    quality_result={"command": args.quality_command, "status": "passed", "evidence": args.quality_evidence}
+                    if args.quality_command else None,
+                    handoff=handoff,
+                )
+                _print_json({"result": normalized.to_dict(), "sync": synced})
+                return 0
+            _print_json({"result": normalized.to_dict(), "sync": "not-completed"})
+            return 1
+        _print_json(adapter.manifest.to_dict())
+        return 0
+
+    if args.command == "bootstrap":
+        from mac.bootstrap import bootstrap_project
+        generated = bootstrap_project(args.project_root)
+        if args.task_id is None:
+            _print_json({"generated": [str(path) for path in generated], "source_of_truth": "mac.db"})
+            return 0
+
+    if args.command in {"context", "bootstrap"}:
+        from mac.adapters import discover_adapters
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        adapter = discover_adapters().get(args.adapter_id)
+        if adapter is None:
+            logger.error("Unknown adapter: %s", args.adapter_id)
+            return 2
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        packet = registry.prepare_worker_packet(args.task_id, agent_id=args.agent_id)
+        output_dir = Path(args.output_dir)
+        prepared = adapter.prepare_context(task_id=args.task_id, context=packet, output_dir=output_dir)
+        if args.command == "bootstrap":
+            output_dir.mkdir(parents=True, exist_ok=True)
+            tasks = registry.list_tasks()
+            plans = registry.list_plans()
+            conflicts = registry.list_conflicts(resolved=False)
+            state = {
+                "schema_version": "1.0",
+                "task_id": args.task_id,
+                "agent_id": args.agent_id,
+                "tasks": [{"task_id": t.task_id, "status": t.status, "summary": t.payload.summary} for t in tasks],
+                "plans": [{"plan_id": p.plan_id, "status": p.status, "goal": p.goal} for p in plans],
+                "unresolved_conflicts": len(conflicts),
+            }
+            (output_dir / "current-task.md").write_text(packet, encoding="utf-8")
+            (output_dir / "project-state.json").write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            (output_dir / "README.md").write_text(
+                "# MAC Project Context\n\n"
+                "Generated from the MAC ledger. Do not edit these files as a source of truth.\n"
+                "Start work from `current-task.md`; inspect `project-state.json`; record completion with `mac-agent done`.\n",
+                encoding="utf-8",
+            )
+        _print_json({"task_id": args.task_id, "adapter": args.adapter_id, "path": str(prepared.path)})
+        return 0
     if args.command == "contract":
         from mac.testing.contracts import TestContract
 
@@ -744,9 +857,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         from mac.storage.sqlite import SQLiteStorage
 
         timeout = getattr(args, "timeout", None)
-        expired = Registry(SQLiteStorage(Path(args.db))).expire_stale_agents(timeout_seconds=timeout)
-        if expired:
-            for agent in expired:
+        expired_agents = Registry(SQLiteStorage(Path(args.db))).expire_stale_agents(timeout_seconds=timeout)
+        if expired_agents:
+            for agent in expired_agents:
                 logger.info("Expired: %s (offline)", agent.agent_id)
         else:
             logger.info("No stale agents found.")

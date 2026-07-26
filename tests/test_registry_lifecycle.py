@@ -1,7 +1,7 @@
 import pytest
 
-from mac.protocol.messages import AgentCapability, AgentCard, ContextBundle, TaskPayload, TaskTransfer
 from mac.protocol.errors import QualityGateError, StateConflictError
+from mac.protocol.messages import AgentCapability, AgentCard, ContextBundle, TaskPayload, TaskTransfer
 from mac.registry import Registry
 from mac.storage import SQLiteTaskLedger
 from mac.testing.contracts import TestContract

@@ -179,8 +179,8 @@ def test_http_expire_stale_transitions_stuck_tasks(tmp_path):
         ttl_seconds=1,
     )
     client.post("/tasks", json=task.model_dump(mode="json"))
-    client.post(f"/agents/worker/claim", json={"capability": "write_code"})
-    client.post(f"/tasks/stuck-task/start", json={"agent_id": "worker"})
+    client.post("/agents/worker/claim", json={"capability": "write_code"})
+    client.post("/tasks/stuck-task/start", json={"agent_id": "worker"})
 
     import time
     time.sleep(2)

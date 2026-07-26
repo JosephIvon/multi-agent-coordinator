@@ -71,7 +71,23 @@ class HandoffResult(BaseModel):
     risks: list[str] = Field(default_factory=list)
     boundary_review: Literal["pass", "block", "not_required"] = "not_required"
     violated_guardrail: list[str] = Field(default_factory=list)
+    handoff_to: str | None = None
+    blocker_id: str | None = None
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
+
+class BlockerRecord(BaseModel):
+    """A durable reason that prevents a task from progressing."""
+
+    blocker_id: str = Field(default_factory=lambda: str(uuid4()))
+    task_id: str
+    agent_id: str
+    reason: str
+    handoff_to: str | None = None
+    status: Literal["open", "resolved"] = "open"
+    created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    resolved_at: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConflictRecord(BaseModel):

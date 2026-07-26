@@ -8,7 +8,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -61,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         _run([str(python), "-c", "from mac.events import TaskEventBus; print(TaskEventBus.__name__)"])
         _run([*pip_install, f"{wheel}[http]"])
         _run([str(python), "-c", "from mac.transport.http_ws import create_app; print(create_app.__name__)"])
+        if not _venv_script(venv, "mac-http-server").exists():
+            raise SystemExit("mac-http-server entry point was not installed")
 
     return 0
 

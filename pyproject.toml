@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mac-agent"
-version = "0.8.0"
+version = "1.0.0"
 description = "A lightweight multi-agent coordination ledger for task handoff, context handoff, and quality gates."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -14,7 +14,7 @@ authors = [
 ]
 keywords = ["ai-agents", "coordination", "task-ledger", "handoff", "testing"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
@@ -40,6 +40,7 @@ Issues = "https://github.com/JosephIvon/multi-agent-coordinator/issues"
 [project.optional-dependencies]
 http = [
   "fastapi>=0.110",
+  "uvicorn>=0.30",
 ]
 mcp = [
   "mcp>=1.0",
@@ -61,6 +62,7 @@ dev = [
 [project.scripts]
 mac-agent = "mac.cli:main"
 mac-mcp-server = "mac.mcp_server:main"
+mac-http-server = "mac.transport.http_ws:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

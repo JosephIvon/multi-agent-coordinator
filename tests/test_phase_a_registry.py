@@ -11,7 +11,6 @@ from mac.protocol.messages import (
     CoordinationPolicy,
     HandoffResult,
     PathRule,
-    Plan,
     TaskPayload,
     TaskTransfer,
     VerificationEntry,
@@ -531,7 +530,7 @@ def test_expire_stale_tasks_fails_running_task_past_ttl(tmp_path):
     registry.submit_task(task)
     # Manually backdate updated_at to simulate passage of time.
     t = registry.get_task("stale")
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     old_time = (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat()
     t.updated_at = old_time
     registry.ledger.save_task_transfer(t)
@@ -564,7 +563,7 @@ def test_expire_stale_tasks_handles_review_ready_tasks(tmp_path):
     registry.mark_review_ready("stuck-review", agent_id="worker")
     # Backdate
     t = registry.get_task("stuck-review")
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
     registry.ledger.save_task_transfer(t)
 
@@ -591,7 +590,7 @@ def test_expire_stale_auto_retry_resets_to_proposed(tmp_path):
     registry.submit_task(task)
     # Backdate
     t = registry.get_task("retry-me")
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
     registry.ledger.save_task_transfer(t)
 
@@ -611,7 +610,7 @@ def test_expire_stale_auto_retry_fails_when_retries_exhausted(tmp_path):
     registry.submit_task(task)
     # Backdate
     t = registry.get_task("no-retry")
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
     registry.ledger.save_task_transfer(t)
 
@@ -629,7 +628,7 @@ def test_expire_stale_no_auto_retry_always_fails(tmp_path):
     registry.submit_task(task)
     # Backdate
     t = registry.get_task("force-fail")
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     t.updated_at = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
     registry.ledger.save_task_transfer(t)
 

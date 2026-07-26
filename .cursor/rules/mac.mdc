@@ -1,0 +1,18 @@
+---
+description: MAC coordination entry point
+alwaysApply: true
+---
+
+<!-- MAC:BEGIN managed context entry -->
+## Multi-Agent Coordinator (MAC)
+
+This project uses **MAC as the single source of truth** for agent, task, session,
+blocker, handoff, and quality state. Do not duplicate project state in IDE rule
+files. Read the current worker packet with `mac-agent next` or `mac-agent context`,
+and write results back with MAC CLI, MCP, or authenticated HTTP callbacks.
+
+- Ledger: `mac.db` (override with `MAC_DB_PATH`)
+- MCP server: `mac-mcp-server`
+- Project context cache: `.agent-context/` (generated; never authoritative)
+- Rules here are only an entry point; task facts belong in the MAC ledger.
+<!-- MAC:END managed context entry -->

@@ -11,6 +11,7 @@ from mac.events import TaskEvent, TaskEventBus
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
     AuditEntry,
+    BlockerRecord,
     ConflictRecord,
     CoordinationPolicy,
     HandoffResult,
@@ -195,6 +196,78 @@ class Registry:
             action="reject_handoff",
             message=reason,
         )
+
+    def block_task(self, task_id: str, *, agent_id: str, reason: str,
+                   handoff_to: str | None = None, metadata: dict[str, Any] | None = None) -> TaskTransfer:
+        task = self._get_task(task_id)
+        if task.status not in {"accepted", "running", "review_ready"}:
+            raise StateConflictError(f"Task {task_id!r} status is {task.status!r}; cannot block.")
+        previous_status = task.status
+        blocker = BlockerRecord(task_id=task_id, agent_id=agent_id, reason=reason,
+                                handoff_to=handoff_to, metadata=metadata or {})
+        self.ledger.save_blocker(blocker)
+        self.ledger.save_handoff_result(HandoffResult(
+            task_id=task_id, agent_id=agent_id, risks=[reason], boundary_review="block",
+            handoff_to=handoff_to, blocker_id=blocker.blocker_id,
+        ))
+        task.status = "blocked"
+        task.error_code = "TASK_BLOCKED"
+        task.updated_at = _now_id()
+        details = dict(task.metadata or {})
+        details["active_blocker_id"] = blocker.blocker_id
+        if handoff_to:
+            details["handoff_to"] = handoff_to
+            task.fallback_agent_id = handoff_to
+        task.metadata = details
+        self.ledger.save_task_transfer(task)
+        self._audit(task, "block_task", agent_id, message=reason,
+                    from_status=previous_status, to_status="blocked",
+                    metadata={"blocker_id": blocker.blocker_id, "handoff_to": handoff_to})
+        self._publish(task, "task_blocked", actor=agent_id, from_status=previous_status,
+                      to_status="blocked", payload={"blocker": blocker.model_dump(mode="json")})
+        return task
+
+    def resume_blocked_task(self, task_id: str, *, agent_id: str, resolution: str = "") -> TaskTransfer:
+        task = self._get_task(task_id)
+        if task.status != "blocked":
+            raise StateConflictError(f"Task {task_id!r} status is {task.status!r}, expected 'blocked'.")
+        for blocker in self.ledger.list_blockers(task_id=task_id, status="open"):
+            self.ledger.save_blocker(blocker.model_copy(update={
+                "status": "resolved", "resolved_at": _now_id(),
+                "metadata": {**blocker.metadata, "resolution": resolution, "resolved_by": agent_id},
+            }))
+        task.status = "proposed"
+        task.error_code = None
+        task.target_agent_id = task.fallback_agent_id or task.target_agent_id
+        task.updated_at = _now_id()
+        self.ledger.save_task_transfer(task)
+        self._audit(task, "resume_blocked_task", agent_id, message=resolution,
+                    from_status="blocked", to_status="proposed")
+        self._publish(task, "task_resumed", actor=agent_id, from_status="blocked", to_status="proposed")
+        return task
+
+    def apply_agent_result(self, task_id: str, *, agent_id: str, result: Any) -> dict[str, Any]:
+        """Normalize one callback result into the canonical task state machine."""
+        from mac.adapters.lifecycle import AgentResult
+        from mac.security import redact
+        normalized = result if isinstance(result, AgentResult) else AgentResult(**result)
+        if normalized.status not in {"completed", "failed", "error", "cancelled", "blocked"}:
+            raise StateConflictError(f"Unsupported agent result status: {normalized.status!r}")
+        if normalized.status == "blocked":
+            task = self.block_task(task_id, agent_id=agent_id,
+                                   reason=normalized.blocker or normalized.summary or "Agent blocked",
+                                   handoff_to=normalized.handoff_to,
+                                   metadata={"raw": redact(normalized.raw)})
+            return {"task_id": task_id, "status": task.status}
+        if normalized.status in {"failed", "error", "cancelled"}:
+            task = self.fail_task(task_id, agent_id, "REMOTE_AGENT_FAILED", normalized.summary)
+            return {"task_id": task_id, "status": task.status}
+        handoff = HandoffResult(task_id=task_id, agent_id=agent_id,
+                                changed_files=list(normalized.changed_files), risks=list(normalized.risks))
+        quality = {"agent_id": agent_id, "command": "remote-agent-callback", "status": "passed",
+                   "evidence": list(normalized.verification) or ["callback_result"],
+                   "output": redact(normalized.summary)}
+        return self.done(task_id, agent_id, quality_result=quality, handoff=handoff)
 
     def fail_task(self, task_id: str, agent_id: str, error_code: str, message: str = "") -> TaskTransfer:
         task = self._get_task(task_id)
@@ -1010,6 +1083,7 @@ class Registry:
         message: str = "",
         from_status: str | None = None,
         to_status: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self.ledger.record_audit_entry(
             AuditEntry(
@@ -1021,6 +1095,7 @@ class Registry:
                 from_status=from_status,
                 to_status=to_status,
                 message=message,
+                metadata=metadata or {},
             )
         )
 
@@ -1191,6 +1266,9 @@ def _readiness_decision(
             return "complete_task", None
         reason = quality_preview.reason if quality_preview is not None else "quality_gate_unavailable"
         return "submit_quality_result", f"quality_gate_failed:{reason or 'quality_gate_failed'}"
+    if task.status == "blocked":
+        reason = task.metadata.get("active_blocker_id", "unknown")
+        return "resolve_blocker_or_handoff", f"task_blocked:{reason}"
     if task.status == "review_ready":
         return "accept_or_reject_review", None
     if task.status == "completed":

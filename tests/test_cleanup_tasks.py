@@ -1,5 +1,5 @@
 from mac.mcp_server import mac_cleanup_tasks
-from mac.protocol.messages import AgentCapability, AgentCard, ContextBundle, TaskPayload, TaskTransfer
+from mac.protocol.messages import ContextBundle, TaskPayload, TaskTransfer
 from mac.registry import Registry
 from mac.storage import SQLiteTaskLedger
 
@@ -41,7 +41,6 @@ def test_cleanup_tasks_with_status_filter(tmp_path):
 def test_cleanup_tasks_with_plan_filter(tmp_path):
     registry = _registry_with_tasks(tmp_path, ["failed", "failed"])
     task = registry.get_task("t0")
-    from mac.protocol.messages import Plan
     plan = registry.create_plan(goal="test plan")
     task = task.model_copy(update={"plan_id": plan.plan_id})
     registry.ledger.save_task_transfer(task)
@@ -82,6 +81,7 @@ def test_cleanup_cli_with_status_filter(tmp_path):
 
 def test_cleanup_http_endpoint(tmp_path):
     from fastapi.testclient import TestClient
+
     from mac.transport.http_ws import create_app
 
     registry = _registry_with_tasks(tmp_path, ["failed", "cancelled", "completed"])
@@ -99,6 +99,7 @@ def test_cleanup_http_endpoint(tmp_path):
 
 def test_cleanup_http_with_status_filter(tmp_path):
     from fastapi.testclient import TestClient
+
     from mac.transport.http_ws import create_app
 
     registry = _registry_with_tasks(tmp_path, ["failed", "cancelled"])
@@ -113,7 +114,7 @@ def test_cleanup_http_with_status_filter(tmp_path):
 
 def test_cleanup_mcp_tool(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    registry = _registry_with_tasks(tmp_path, ["failed", "cancelled"])
+    _registry_with_tasks(tmp_path, ["failed", "cancelled"])
     monkeypatch.setattr("mac.mcp_server._DB_PATH", tmp_path / "mac.db")
 
     result = mac_cleanup_tasks()

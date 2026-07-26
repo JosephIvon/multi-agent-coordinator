@@ -1,0 +1,15 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mac": {
+      "type": "local",
+      "command": [
+        "mac-mcp-server"
+      ],
+      "enabled": true,
+      "environment": {
+        "MAC_DB_PATH": "mac.db"
+      }
+    }
+  }
+}

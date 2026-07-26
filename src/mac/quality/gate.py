@@ -30,7 +30,7 @@ def evaluate_quality_gate(
         if missing_commands:
             return False, "missing_command:" + ",".join(missing_commands)
 
-    evidence = set()
+    evidence: set[str] = set()
     for result in passed_results:
         evidence.update(str(item) for item in result.get("evidence", []))
 

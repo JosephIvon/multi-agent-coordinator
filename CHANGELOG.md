@@ -2,14 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on Keep a Changelog, and this project follows Semantic Versioning.
 
-## [0.8.0] — 2026-07-24
+## [1.0.0] ? 2026-07-26
 
 ### Added
 
-- **P0-1**: `TestContract.for_risk()` supports `custom_commands` and `custom_evidence` parameters to override hardcoded pytest commands and evidence names — enables quality gates for non-Python projects (e.g. `vue-tsc`, `biome check`)
+- Production HTTP lifecycle with authenticated remote dispatch, durable result callbacks, identity binding, and replay handling.
+- Durable SQLite `SessionState` with query, heartbeat, offline expiry, and recovery endpoints.
+- First-class `blocked` lifecycle with durable blockers, handoff targets, audit events, and resume flow.
+- `mac-agent bootstrap` entries for Codex, Claude Code, Cursor, OpenCode, Trae, Qoder, and WorkBuddy.
+- Real MCP connection templates and remote callback integration documentation.
+- Command timeout/cancellation behavior, sensitive-field redaction, and concurrent session tests.
+- `mac-http-server` production entry point with loopback binding by default.
+- Installation/upgrade guide and end-to-end callback example.
+
+### Changed
+
+- Package promoted from Alpha to Production/Stable.
+- HTTP optional dependency now includes Uvicorn.
+- Version synchronized to 1.0.0 across package metadata and runtime.
+- Lint and type checks pass; test suite contains 278 tests.
+
+### Security
+
+- Optional constant-time Bearer credential verification.
+- Callback event IDs are atomically claimed; exact replays are safe and conflicting replays return HTTP 409.
+- Callback agent/task identity must match the durable session.
+
+## [0.8.0] 鈥?2026-07-24
+
+### Added
+
+- **P0-1**: `TestContract.for_risk()` supports `custom_commands` and `custom_evidence` parameters to override hardcoded pytest commands and evidence names 鈥?enables quality gates for non-Python projects (e.g. `vue-tsc`, `biome check`)
 - **P0-1**: `mac-agent contract --custom-command` and `--custom-evidence` CLI flags
 - **P0-1**: `mac-agent submit --custom-command` and `--custom-evidence` CLI flags
 - **P1-1**: `mac-agent submit --spec-json` CLI flag for structured task specs stored in `task.metadata.spec`
@@ -30,27 +55,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI lint job upgraded from `import mac` check to `ruff check` + `mypy`
 - CI test job now collects coverage via `pytest-cov` and uploads `coverage.xml` artifact
 - Publish workflow migrated from API token to PyPI Trusted Publishing (OIDC)
-- SPEC.md updated: 15 → 16 MCP tools
-- README.md updated: 15 → 16 MCP tools
-- CLAUDE.md updated: K-002 status → ✅已修, 15 → 16 tools
-- Test count: ~251 → ~261
+- SPEC.md updated: 15 鈫?16 MCP tools
+- README.md updated: 15 鈫?16 MCP tools
+- CLAUDE.md updated: K-002 status 鈫?鉁呭凡淇? 15 鈫?16 tools
+- Test count: ~251 鈫?~261
 
-## [0.7.0] — 2026-07-23
+## [0.7.0] 鈥?2026-07-23
 
 ### Added
 
-- **C-6**: `Registry.done()` single entry point for finishing a task: submit quality evidence → save handoff → complete (or mark review-ready, auto-branching on `require_review`)
+- **C-6**: `Registry.done()` single entry point for finishing a task: submit quality evidence 鈫?save handoff 鈫?complete (or mark review-ready, auto-branching on `require_review`)
 - **C-6**: `mac-agent done` CLI command (only `--task-id` and `--agent-id` required)
 - **C-6**: `mac_done` MCP tool (15 tools total; `mac_record_quality_and_complete` kept as legacy)
 - **C-6**: `POST /tasks/{task_id}/done` HTTP endpoint
-- Rewrote `docs/USER_GUIDE.md` with AI-tool-first approach: normal workflow is `mac_next_task` → `mac_done` (two steps, no state machine to remember)
+- Rewrote `docs/USER_GUIDE.md` with AI-tool-first approach: normal workflow is `mac_next_task` 鈫?`mac_done` (two steps, no state machine to remember)
 
 ### Changed
 
 - SPEC.md updated to v2.5 (C-6 done feature, 15 MCP tools)
-- Test count: ~240 → ~251
+- Test count: ~240 鈫?~251
 
-## [0.6.0] — 2026-07-23
+## [0.6.0] 鈥?2026-07-23
 
 ### Added
 
@@ -67,14 +92,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **C-4**: CLI structured logging (`logging` module replaces `print()` for diagnostics)
 - **C-4**: `--verbose` / `--quiet` global CLI flags
 - **C-5**: `mac-agent dashboard` command: project overview (plans, tasks, agents, conflicts, metrics)
-- MCP tools count: 13 → 14
+- MCP tools count: 13 鈫?14
 
 ### Changed
 
 - SPEC.md updated to v2.4 (Phase C features, `agent_timeout` in CoordinationPolicy)
-- Test count: ~232 → ~240
+- Test count: ~232 鈫?~240
 
-## [0.5.0] — 2026-07-23
+## [0.5.0] 鈥?2026-07-23
 
 ### Added
 
@@ -83,7 +108,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **B-3**: `expire_stale_tasks()` transitions non-terminal tasks past their TTL to `failed` with `error_code="TTL_EXPIRED"`
 - **B-3**: `mac-agent expire-stale` CLI command
 - **B-4**: `mac-agent next` one-shot command: atomically claim + start + output worker packet
-- **B-5**: `CoordinationPolicy.reviewer_capability` field + `MAC_REVIEWER_CAPABILITY` env var — gates `accept_review()`/`reject_review()` on reviewer capability
+- **B-5**: `CoordinationPolicy.reviewer_capability` field + `MAC_REVIEWER_CAPABILITY` env var 鈥?gates `accept_review()`/`reject_review()` on reviewer capability
 - E2E validation script (`examples/e2e_multi_agent.py`) expanded to 17 steps covering all Phase B features
 - Phase B design document (`docs/superpowers/specs/2026-07-23-mac-phase-b-design.md`)
 - PyPI publishing research (`docs/research/p3-pypi-publishing.md`)
@@ -94,7 +119,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SPEC.md updated to v2.3 (Phase B features, `reviewer_capability` in CoordinationPolicy)
 - `pyproject.toml` metadata: added `authors`, `license`, `project.urls`; fixed TOML structure
 
-## [0.4.0] — 2026-07-23
+## [0.4.0] 鈥?2026-07-23
 
 ### Added
 
@@ -104,16 +129,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GET /metrics` HTTP endpoint (6 aggregate indicators)
 - Review lifecycle CLI subcommand (`mac-agent review-lifecycle`)
 - Review lifecycle MCP tools: `mac_mark_review_ready`, `mac_accept_review`, `mac_reject_review`
-- MCP tools count: 8 → 11
+- MCP tools count: 8 鈫?11
 - Dual state machine diagram in SPEC.md (with/without review)
 
 ### Changed
 
 - `complete_task()` raises `StateConflictError` when `require_review=True` and task is `running`
 - SPEC.md updated to v2.2
-- Test count: ~211 → ~218
+- Test count: ~211 鈫?~218
 
-## [0.3.0] — 2026-07-22
+## [0.3.0] 鈥?2026-07-22
 
 ### Added
 
@@ -135,3 +160,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 [0.5.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.5.0
 [0.4.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.4.0
 [0.3.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v0.3.0
+[1.0.0]: https://github.com/JosephIvon/multi-agent-coordinator/releases/tag/v1.0.0

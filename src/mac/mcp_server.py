@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
@@ -254,7 +254,7 @@ def mac_save_handoff(
             task_id=task_id,
             agent_id=agent_id,
             changed_files=changed_files or [],
-            boundary_review=boundary_review,
+            boundary_review=cast(Literal["pass", "block", "not_required"], boundary_review),
             risks=risks or [],
             verification=[
                 VerificationEntry(

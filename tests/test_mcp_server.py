@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from mcp.server.fastmcp.exceptions import ToolError
 
 from mac.mcp_server import (
@@ -35,7 +34,6 @@ from mac.protocol.messages import (
 )
 from mac.registry import Registry
 from mac.storage import SQLiteTaskLedger
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -463,7 +461,6 @@ class TestToolErrorIsErrorFlag:
     async def _test_not_found() -> None:
         from mcp import types
 
-        from mac.mcp_server import mcp
 
         handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
@@ -483,7 +480,6 @@ class TestToolErrorIsErrorFlag:
     async def _test_validation_error() -> None:
         from mcp import types
 
-        from mac.mcp_server import mcp
 
         handler = mcp._mcp_server.request_handlers[types.CallToolRequest]
         req = types.CallToolRequest(
@@ -507,7 +503,6 @@ class TestToolErrorIsErrorFlag:
     async def _test_success(tmp_path: Path) -> None:
         from mcp import types
 
-        from mac.mcp_server import mcp
 
         reg, _ = _registry_with_db(tmp_path)
         reg.submit_task(
@@ -613,7 +608,7 @@ class TestStdioE2E:
             cwd=str(tmp_path),  # mac.db will be created here
         )
 
-        async with stdio_client(server_params) as (read_stream, write_stream):
+        async with stdio_client(server_params) as (read_stream, write_stream):  # noqa: SIM117
             async with ClientSession(read_stream, write_stream) as session:
                 # 1. Initialize
                 result = await session.initialize()
