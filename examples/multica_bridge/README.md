@@ -178,17 +178,27 @@ examples/multica_bridge/
   When `MULTICA_GUARDED_PATHS` is empty (default), every overlap stays
   non-blocking and the review packet keeps a single section, so existing
   deployments see no behaviour change.
+- **Refuse `done()` on blocking conflicts**: when the bridge has at least one
+  guarded pattern **and** `MULTICA_REFUSE_ON_BLOCKING` is not set to a falsy
+  value (`0`, `false`, `no`, empty string), `Registry.done()` is called with
+  `refuse_on_blocking=True`. If a blocking overlap is detected the bridge
+  rolls the task back to `running` (via `Registry._transition("running",
+  expected_status="completed"|"review_ready", action="rollback_blocking_conflict")`),
+  preserves the handoff in the ledger so reviewers can see what was
+  attempted, and returns
+  `{"status": "blocking_conflict", "conflicts": [...], "quality_gate": "passed"}`.
+  The webhook still returns 200 so Multica sees the structured refusal; the
+  reverse channel is skipped because there is no completed-state review
+  packet to post. Setting `MULTICA_REFUSE_ON_BLOCKING=false` (or leaving
+  `MULTICA_GUARDED_PATHS` empty) keeps the old informational behaviour.
 
 ## Next steps if you keep building
 
-1. **Conflict-aware review routing**: when a guard produces blocking
-   conflicts, refuse the `done()` transition rather than just surfacing the
-   conflict in the review packet. Today blocking is informational only.
-2. **Agent card sync from Multica**: today the bridge leaves
+1. **Agent card sync from Multica**: today the bridge leaves
    `allowed_paths` / `forbidden_paths` unset unless the operator registers
    the agent in MAC by hand. Wiring Multica's agent roster into
    `Registry.register(...)` would turn enforcement on automatically.
-3. **Audit-trail shipping**: every webhook handler currently logs at DEBUG;
+2. **Audit-trail shipping**: every webhook handler currently logs at DEBUG;
    sending the audit trail (and conflict events) into Multica as issue
    comments would let reviewers see the full lifecycle without a separate
    mac-agent CLI round-trip.

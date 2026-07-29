@@ -476,6 +476,7 @@ class Registry:
         detect_conflicts: bool = False,
         enforce_boundaries: bool = False,
         guarded_patterns: list[str] | None = None,
+        refuse_on_blocking: bool = False,
     ) -> dict[str, Any]:
         """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
 
@@ -502,13 +503,25 @@ class Registry:
             completed successfully), or ``violations`` (only when
             ``enforce_boundaries=True`` and the handoff crossed the
             agent path boundary; status will be
-            ``"boundary_violation"`` and the task stays running).
+            ``"boundary_violation"`` and the task stays running),
+            or ``blocking_conflicts`` (only when
+            ``refuse_on_blocking=True`` and a blocking overlap was
+            detected; status will be ``"blocking_conflict"`` and the
+            task stays running so the agent can resolve the overlap
+            before retrying).
         :param enforce_boundaries: When True, refuse to save the handoff
             if any of its ``changed_files`` fall outside the agent's
             ``allowed_paths`` / ``forbidden_paths``. Returns a structured
             ``boundary_violation`` result instead of completing the task.
             Defaults to False to preserve the soft-block behaviour of
             ``save_handoff_result`` for callers that don't opt in.
+        :param refuse_on_blocking: When True and any conflict recorded
+            during this call has ``severity="blocking"`` (i.e. matches
+            one of ``guarded_patterns``), return a structured
+            ``blocking_conflict`` result without transitioning the task.
+            The handoff is still saved so the reviewer can see what the
+            agent attempted; the conflict is recorded so the next attempt
+            can address it. Defaults to False (informational only).
         """
         # 0. Hard-refuse the handoff if boundaries are enforced.
         if enforce_boundaries and handoff is not None:
@@ -556,6 +569,24 @@ class Registry:
                 )
                 if conflicts:
                     result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
+                    if refuse_on_blocking and any(
+                        c.severity == "blocking" for c in conflicts
+                    ):
+                        # Roll the task back to running so the agent
+                        # can address the blocking overlap before retrying.
+                        self._transition(
+                            task_id,
+                            "running",
+                            expected_status="review_ready",
+                            agent_id=agent_id,
+                            action="rollback_blocking_conflict",
+                        )
+                        return {
+                            "status": "blocking_conflict",
+                            "task_id": task_id,
+                            "quality_gate": "passed",
+                            "conflicts": [c.model_dump(mode="json") for c in conflicts],
+                        }
             return result
 
         # No review required: save handoff first, then complete.
@@ -574,6 +605,24 @@ class Registry:
             )
             if conflicts:
                 result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
+                if refuse_on_blocking and any(
+                    c.severity == "blocking" for c in conflicts
+                ):
+                    # Roll the task back to running so the agent
+                    # can address the blocking overlap before retrying.
+                    self._transition(
+                        task_id,
+                        "running",
+                        expected_status="completed",
+                        agent_id=agent_id,
+                        action="rollback_blocking_conflict",
+                    )
+                    return {
+                        "status": "blocking_conflict",
+                        "task_id": task_id,
+                        "quality_gate": "passed",
+                        "conflicts": [c.model_dump(mode="json") for c in conflicts],
+                    }
         return result
 
     # ------------------------------------------------------------------

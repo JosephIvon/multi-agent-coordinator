@@ -74,6 +74,7 @@ GUARDED_PATTERNS = [
     for p in os.environ.get("MULTICA_GUARDED_PATHS", "").split(",")
     if p.strip()
 ]
+REFUSE_ON_BLOCKING = os.environ.get("MULTICA_REFUSE_ON_BLOCKING", "true").lower() not in ("0", "false", "no", "")
 
 logger = logging.getLogger("multica_bridge")
 
@@ -301,6 +302,7 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
         detect_conflicts=True,
         enforce_boundaries=True,
         guarded_patterns=GUARDED_PATTERNS or None,
+        refuse_on_blocking=bool(GUARDED_PATTERNS) and REFUSE_ON_BLOCKING,
     )
     # Reverse channel: post the review packet back to Multica so the
     # original issue shows the structured handoff. Failures are
@@ -315,6 +317,18 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
             "path boundary violation for %s: %s",
             tid,
             result.get("violations"),
+        )
+        return result
+    if status == "blocking_conflict":
+        # A blocking overlap was detected under a guarded module;
+        # the task has been rolled back to running so the agent can
+        # address the conflict before retrying. Skip the reverse
+        # channel (no completed-state review packet to post) but keep
+        # the webhook 200 so Multica sees the structured conflicts.
+        logger.warning(
+            "blocking conflict for %s under guarded module: %d conflict(s)",
+            tid,
+            len(result.get("conflicts") or []),
         )
         return result
     if status in ("completed", "review_ready"):

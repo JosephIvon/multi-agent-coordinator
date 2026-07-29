@@ -270,8 +270,13 @@ def test_blocking_conflicts_segregated_in_review_packet(
 ):
     """Guarded overlap is recorded with severity=blocking and rendered
     under a separate "## Blocking Conflicts" header in the review packet.
+    This test forces ``refuse_on_blocking=False`` so it exercises the
+    informational-only path (refusal is covered separately in
+    test_blocking_conflict_refuses_done_transition).
     """
+    # Force informational mode: no refusal even when a blocking conflict fires.
     monkeypatch.setattr(isolated_bridge, "GUARDED_PATTERNS", ["secrets/*"])
+    monkeypatch.setattr(isolated_bridge, "REFUSE_ON_BLOCKING", False)
     monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
     _seed_submitted_task(isolated_client, "GD-1")
     _seed_submitted_task(isolated_client, "GD-2")
@@ -291,6 +296,8 @@ def test_blocking_conflicts_segregated_in_review_packet(
     )
     assert r.status_code == 200
     # Wire the reverse channel and complete GD-2 with the SAME guarded file.
+    # Turn the guard back ON so GD-2 actually generates blocking conflicts.
+    monkeypatch.setattr(isolated_bridge, "GUARDED_PATTERNS", ["secrets/*"])
     monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
     captured = []
     monkeypatch.setattr(
@@ -311,6 +318,7 @@ def test_blocking_conflicts_segregated_in_review_packet(
         },
     )
     body = r.json()
+    # With refuse_on_blocking=False, the task completes even with blocking conflicts.
     assert body["status"] == "completed"
     assert any(c["severity"] == "blocking" for c in body["conflicts"])
     assert captured
@@ -319,6 +327,70 @@ def test_blocking_conflicts_segregated_in_review_packet(
     assert "## Open Conflicts (non-blocking)" in packet
     assert "secrets/key.pem" in packet
     assert "BLOCKING" in packet
+
+
+def test_blocking_conflict_refuses_done_transition(
+    isolated_client, isolated_bridge, monkeypatch
+):
+    """When a guard fires AND refuse_on_blocking is on (i.e. the bridge
+    has a non-empty GUARDED_PATTERNS), the bridge rolls the task back to
+    running and returns a structured blocking_conflict result. The reverse
+    channel must NOT fire (the task is not completed). The task remains
+    running in the ledger so the agent can retry after addressing the
+    overlap.
+    """
+    monkeypatch.setattr(isolated_bridge, "GUARDED_PATTERNS", ["secrets/*"])
+    assert bool(isolated_bridge.GUARDED_PATTERNS) is True
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
+    _seed_submitted_task(isolated_client, "RF-1")
+    _seed_submitted_task(isolated_client, "RF-2")
+    # Complete RF-1 first (no refusal yet because there is no overlap).
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "RF-1",
+                "agent_id": "claude-shared",
+                "changed_files": ["secrets/key.pem"],
+                "verification": "pytest:pass",
+                "risks": [],
+            },
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "completed"
+    # Now complete RF-2 with the SAME guarded file. With refuse_on_blocking
+    # on (because GUARDED_PATTERNS is truthy), the bridge rolls the task
+    # back to running and returns blocking_conflict.
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+    monkeypatch.setattr(
+        isolated_bridge.urllib.request, "urlopen",
+        lambda *a, **kw: (captured.append(1) or _FakeResponse(201)),
+    )
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "RF-2",
+                "agent_id": "claude-shared",
+                "changed_files": ["secrets/key.pem"],
+                "verification": "pytest:pass",
+                "risks": [],
+            },
+        },
+    )
+    body = r.json()
+    assert body["status"] == "blocking_conflict"
+    assert body["task_id"] == "multica-RF-2"
+    assert any(c["severity"] == "blocking" for c in body["conflicts"])
+    # Reverse channel must NOT fire for a refused handoff.
+    assert captured == []
+    # The task is rolled back to running, NOT completed.
+    task = isolated_bridge.registry.ledger.get_task_transfer("multica-RF-2")
+    assert task.status == "running"
 
 
 def test_review_packet_includes_file_overlap_conflicts(isolated_client, isolated_bridge, monkeypatch):

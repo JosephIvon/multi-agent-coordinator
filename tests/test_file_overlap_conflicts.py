@@ -155,3 +155,76 @@ def test_mixed_paths_split_blocking_and_non_blocking(tmp_path):
     by_file = {c.involved_files[0]: c for c in created}
     assert by_file["secrets/key.pem"].severity == "blocking"
     assert by_file["src/shared.py"].severity == "non_blocking"
+
+def test_refuse_on_blocking_short_circuits_done(tmp_path):
+    """When refuse_on_blocking=True and a blocking conflict fires, done()
+    returns a structured blocking_conflict status instead of completing
+    the task. The task stays running so the agent can retry after addressing
+    the overlap."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _run_task(registry, "task-a", "a", ["secrets/key.pem"])
+    # Now run task-b with refuse_on_blocking=True. It should NOT complete.
+    registry.register(AgentCard(
+        agent_id="b",
+        name="b",
+        capabilities=[AgentCapability(name="write_test")]
+    ))
+    registry.submit_task(_task("task-b"))
+    registry.accept_handoff("task-b", "b")
+    registry.start_task("task-b", "b")
+    registry.submit_quality_result(
+        "task-b",
+        {
+            "command": "pytest related tests or smoke test",
+            "status": "passed",
+            "evidence": ["test_output"],
+        },
+    )
+    result = registry.done(
+        "task-b",
+        "b",
+        handoff=_handoff("task-b", "b", ["secrets/key.pem"]),
+        detect_conflicts=True,
+        guarded_patterns=["secrets/*"],
+        refuse_on_blocking=True,
+    )
+    assert result["status"] == "blocking_conflict"
+    assert result["task_id"] == "task-b"
+    assert any(c["severity"] == "blocking" for c in result["conflicts"])
+    # The task was rolled back to running, NOT completed.
+    task = registry.ledger.get_task_transfer("task-b")
+    assert task.status == "running"
+
+
+def test_refuse_on_blocking_default_off_is_informational(tmp_path):
+    """Default refuse_on_blocking=False means a blocking conflict is still
+    surfaced in the result dict but does NOT prevent completion."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _run_task(registry, "task-a", "a", ["secrets/key.pem"])
+    registry.register(AgentCard(
+        agent_id="b",
+        name="b",
+        capabilities=[AgentCapability(name="write_test")]
+    ))
+    registry.submit_task(_task("task-b"))
+    registry.accept_handoff("task-b", "b")
+    registry.start_task("task-b", "b")
+    registry.submit_quality_result(
+        "task-b",
+        {
+            "command": "pytest related tests or smoke test",
+            "status": "passed",
+            "evidence": ["test_output"],
+        },
+    )
+    result = registry.done(
+        "task-b",
+        "b",
+        handoff=_handoff("task-b", "b", ["secrets/key.pem"]),
+        detect_conflicts=True,
+        guarded_patterns=["secrets/*"],
+    )
+    assert result["status"] == "completed"
+    assert any(c["severity"] == "blocking" for c in result["conflicts"])
+    task = registry.ledger.get_task_transfer("task-b")
+    assert task.status == "completed"
