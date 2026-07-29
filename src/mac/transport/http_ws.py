@@ -67,6 +67,7 @@ class RemoteDispatchRequest(BaseModel):
     token: str | None = None
     timeout: float = 60
 
+
 class AgentActionRequest(BaseModel):
     agent_id: str
 
@@ -142,12 +143,18 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
     expected_token = token if token is not None else os.getenv("MAC_HTTP_TOKEN")
 
     if expected_token:
+
         @app.middleware("http")
         async def authenticate(request: Request, call_next: Any) -> Response:
-            if request.url.path not in {"/", "/health"} and not token_matches(expected_token, request.headers.get("Authorization")):
-                return Response(content=json.dumps({"detail": "Invalid or missing bearer token"}),
-                                status_code=401, media_type="application/json",
-                                headers={"WWW-Authenticate": "Bearer"})
+            if request.url.path not in {"/", "/health"} and not token_matches(
+                expected_token, request.headers.get("Authorization")
+            ):
+                return Response(
+                    content=json.dumps({"detail": "Invalid or missing bearer token"}),
+                    status_code=401,
+                    media_type="application/json",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
             return await call_next(request)
 
     @app.get("/")
@@ -343,11 +350,15 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
 
     @app.post("/tasks/{task_id}/checkpoint")
     def checkpoint_task(task_id: str, request: CheckpointTaskRequest) -> TaskTransfer:
-        return _call_task(lambda: registry.record_checkpoint(task_id, agent_id=request.agent_id, checkpoint=request.checkpoint))
+        return _call_task(
+            lambda: registry.record_checkpoint(task_id, agent_id=request.agent_id, checkpoint=request.checkpoint)
+        )
 
     @app.post("/tasks/{task_id}/retry")
     def retry_task(task_id: str, request: RetryTaskRequest) -> TaskTransfer:
-        return _call_task(lambda: registry.retry_task(task_id, agent_id=request.agent_id, fallback_agent_id=request.fallback_agent_id))
+        return _call_task(
+            lambda: registry.retry_task(task_id, agent_id=request.agent_id, fallback_agent_id=request.fallback_agent_id)
+        )
 
     @app.post("/tasks/{task_id}/cancel")
     def cancel_task(task_id: str, request: CancelTaskRequest) -> TaskTransfer:
@@ -364,9 +375,7 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
     @app.post("/tasks/{task_id}/reject-review")
     def reject_review(task_id: str, request: ReviewRejectRequest) -> TaskTransfer:
         return _call_task(
-            lambda: registry.reject_review(
-                task_id, reviewer_id=request.reviewer_id, reason=request.reason
-            )
+            lambda: registry.reject_review(task_id, reviewer_id=request.reviewer_id, reason=request.reason)
         )
 
     @app.post("/tasks/{task_id}/done")
@@ -435,15 +444,20 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
         if request.task_id and registry.get_task(request.task_id) is None:
             raise HTTPException(status_code=404, detail=f"Task {request.task_id!r} not found")
         now = time.time()
-        session = SessionState(agent_id=request.agent_id, session_id=request.session_id or str(uuid4()),
-                               task_id=request.task_id, status="online", callback_url=request.callback_url,
-                               last_heartbeat=now, metadata=request.metadata)
+        session = SessionState(
+            agent_id=request.agent_id,
+            session_id=request.session_id or str(uuid4()),
+            task_id=request.task_id,
+            status="online",
+            callback_url=request.callback_url,
+            last_heartbeat=now,
+            metadata=request.metadata,
+        )
         registry.ledger.save_session(session)
         return session
 
     @app.get("/sessions")
-    def list_sessions(agent_id: str | None = None, task_id: str | None = None,
-                      status: str | None = None) -> list[Any]:
+    def list_sessions(agent_id: str | None = None, task_id: str | None = None, status: str | None = None) -> list[Any]:
         return registry.ledger.list_sessions(agent_id=agent_id, task_id=task_id, status=status)
 
     @app.get("/sessions/{session_id}")
@@ -458,8 +472,7 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
         session = registry.ledger.get_session(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=session_id)
-        refreshed = replace(session, status=request.status, last_heartbeat=time.time(),
-                            updated_at=utc_now())
+        refreshed = replace(session, status=request.status, last_heartbeat=time.time(), updated_at=utc_now())
         registry.ledger.save_session(refreshed)
         return refreshed
 
@@ -485,13 +498,21 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
 
     @app.post("/tasks/{task_id}/blocked")
     def block_task(task_id: str, request: BlockTaskRequest) -> TaskTransfer:
-        return _call_task(lambda: registry.block_task(task_id, agent_id=request.agent_id,
-            reason=request.reason, handoff_to=request.handoff_to, metadata=request.metadata))
+        return _call_task(
+            lambda: registry.block_task(
+                task_id,
+                agent_id=request.agent_id,
+                reason=request.reason,
+                handoff_to=request.handoff_to,
+                metadata=request.metadata,
+            )
+        )
 
     @app.post("/tasks/{task_id}/resume")
     def resume_task(task_id: str, request: ResumeBlockedRequest) -> TaskTransfer:
-        return _call_task(lambda: registry.resume_blocked_task(task_id, agent_id=request.agent_id,
-                                                               resolution=request.resolution))
+        return _call_task(
+            lambda: registry.resume_blocked_task(task_id, agent_id=request.agent_id, resolution=request.resolution)
+        )
 
     @app.get("/tasks/{task_id}/blockers")
     def list_blockers(task_id: str, status: str | None = None) -> list[Any]:
@@ -515,9 +536,9 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
             registry.ledger.abort_callback(event_id)
             raise HTTPException(status_code=409, detail="Session is already completed")
         try:
-            result = _call_task(lambda: registry.apply_agent_result(request.task_id,
-                                                                    agent_id=request.agent_id,
-                                                                    result=request.result))
+            result = _call_task(
+                lambda: registry.apply_agent_result(request.task_id, agent_id=request.agent_id, result=request.result)
+            )
         except Exception:
             registry.ledger.abort_callback(event_id)
             raise
@@ -542,16 +563,24 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
             registry.accept_handoff(task_id, request.agent_id)
         if registry.get_task(task_id).status == "accepted":
             registry.start_task(task_id, request.agent_id)
-        session = SessionState(agent_id=request.agent_id, session_id=str(uuid4()), task_id=task_id,
-                               status="online", callback_url=request.callback_url, last_heartbeat=time.time())
+        session = SessionState(
+            agent_id=request.agent_id,
+            session_id=str(uuid4()),
+            task_id=task_id,
+            status="online",
+            callback_url=request.callback_url,
+            last_heartbeat=time.time(),
+        )
         registry.ledger.save_session(session)
-        payload = {"task": registry.get_task(task_id).model_dump(mode="json"),
-                   "session_id": session.session_id, "callback_url": request.callback_url}
+        payload = {
+            "task": registry.get_task(task_id).model_dump(mode="json"),
+            "session_id": session.session_id,
+            "callback_url": request.callback_url,
+        }
         dispatched = GenericHttpAdapter().dispatch(request.url, payload, token=request.token, timeout=request.timeout)
         if not 200 <= dispatched.status_code < 300:
             registry.fail_task(task_id, request.agent_id, "REMOTE_DISPATCH_FAILED", dispatched.body)
-        return {"session": session.to_dict(), "status_code": dispatched.status_code,
-                "body": dispatched.body[-4000:]}
+        return {"session": session.to_dict(), "status_code": dispatched.status_code, "body": dispatched.body[-4000:]}
 
     @app.get("/ledger/{trace_id}")
     def get_ledger(trace_id: str) -> list[Any]:
