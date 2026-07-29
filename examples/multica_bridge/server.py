@@ -24,12 +24,14 @@ This is a 100-line PoC. Things deliberately deferred:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import hmac
 import json
 import os
 import sys
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -42,7 +44,6 @@ from mac.protocol.messages import (
 )
 from mac.registry import Registry
 from mac.storage.sqlite import SQLiteTaskLedger
-
 
 DB_PATH = os.environ.get("MAC_DB_PATH", "mac.db")
 WEBHOOK_SECRET = os.environ.get("MULTICA_WEBHOOK_SECRET", "")
@@ -96,11 +97,11 @@ def _on_agent_started(data: dict[str, Any]) -> dict[str, Any]:
     # which we swallow.
     tid = _task_id(data["issue_id"])
     agent_id = data["agent_id"]
+    # Idempotent under Multica at-least-once delivery:
+    # duplicate calls hit StateConflictError, which we suppress.
     for action in ("accept_handoff", "start_task"):
-        try:
+        with contextlib.suppress(StateConflictError):
             getattr(registry, action)(tid, agent_id)
-        except StateConflictError:
-            pass  # already past that step
     return {"status": "running", "task_id": tid, "agent_id": agent_id}
 
 
@@ -243,7 +244,7 @@ def _demo() -> int:
     for ev in sample:
         etype = ev["type"]
         result = HANDLERS[etype](ev["data"])
-        print("[demo] {:18s} -> {}".format(etype, result))
+        print(f"[demo] {etype:18s} -> {result}")
     print("[demo] ledger at: " + os.path.abspath(DB_PATH))
     return 0
 

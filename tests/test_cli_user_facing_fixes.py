@@ -8,6 +8,7 @@ Three small UX gaps closed:
 3. `plan` (bare) defaults to `plan list` so the most common operation
    does not require a subcommand.
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,6 @@ import json
 import pytest
 
 from mac.cli import main
-
 
 # ---------------------------------------------------------------------------
 # audit --task-id
@@ -27,14 +27,24 @@ def _bootstrap_task_with_audit_trail(tmp_path, capsys):
     db = tmp_path / "mac.db"
 
     # submit -> audit_trail will record submit_task
-    assert main([
-        "submit",
-        "--db", str(db),
-        "--task-id", "T-AUDIT-1",
-        "--source-agent-id", "test",
-        "--type", "smoke",
-        "--summary", "for audit test",
-    ]) == 0
+    assert (
+        main(
+            [
+                "submit",
+                "--db",
+                str(db),
+                "--task-id",
+                "T-AUDIT-1",
+                "--source-agent-id",
+                "test",
+                "--type",
+                "smoke",
+                "--summary",
+                "for audit test",
+            ]
+        )
+        == 0
+    )
     # Drain stdout so it doesn't leak into the next command's capture.
     capsys.readouterr()
     return db
@@ -94,13 +104,22 @@ def test_audit_requires_either_trace_id_or_task_id(tmp_path, capsys):
 
 
 def _registered_agent(db, capsys):
-    assert main([
-        "register",
-        "--db", str(db),
-        "--agent-id", "agent-x",
-        "--name", "Agent X",
-        "--capability", "smoke",
-    ]) == 0
+    assert (
+        main(
+            [
+                "register",
+                "--db",
+                str(db),
+                "--agent-id",
+                "agent-x",
+                "--name",
+                "Agent X",
+                "--capability",
+                "smoke",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
 
 
@@ -108,14 +127,21 @@ def test_record_conflict_accepts_reason_alias(tmp_path, capsys):
     db = tmp_path / "mac.db"
     _registered_agent(db, capsys)
 
-    exit_code = main([
-        "record-conflict",
-        "--db", str(db),
-        "--task-id", "T-CONFLICT-1",
-        "--source", "fix-verification",
-        "--reason", "smoke-test --reason alias",
-        "--agent", "agent-x",
-    ])
+    exit_code = main(
+        [
+            "record-conflict",
+            "--db",
+            str(db),
+            "--task-id",
+            "T-CONFLICT-1",
+            "--source",
+            "fix-verification",
+            "--reason",
+            "smoke-test --reason alias",
+            "--agent",
+            "agent-x",
+        ]
+    )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -128,13 +154,19 @@ def test_record_conflict_accepts_description_canonical(tmp_path, capsys):
     db = tmp_path / "mac.db"
     _registered_agent(db, capsys)
 
-    exit_code = main([
-        "record-conflict",
-        "--db", str(db),
-        "--task-id", "T-CONFLICT-2",
-        "--source", "fix-verification",
-        "--description", "canonical flag still works",
-    ])
+    exit_code = main(
+        [
+            "record-conflict",
+            "--db",
+            str(db),
+            "--task-id",
+            "T-CONFLICT-2",
+            "--source",
+            "fix-verification",
+            "--description",
+            "canonical flag still works",
+        ]
+    )
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
@@ -175,12 +207,21 @@ def test_plan_list_returns_seeded_plan(tmp_path, capsys):
     _registered_agent(db, capsys)
 
     seed_goal = "ship-v1-1"
-    assert main([
-        "plan", "create",
-        "--db", str(db),
-        "--goal", seed_goal,
-        "--created-by", "review-test",
-    ]) == 0
+    assert (
+        main(
+            [
+                "plan",
+                "create",
+                "--db",
+                str(db),
+                "--goal",
+                seed_goal,
+                "--created-by",
+                "review-test",
+            ]
+        )
+        == 0
+    )
     seed = json.loads(capsys.readouterr().out)
     seeded_id = seed["plan_id"]
     assert seeded_id
@@ -194,9 +235,7 @@ def test_plan_list_returns_seeded_plan(tmp_path, capsys):
     # every shared key between seed and listed record must match
     for key, value in seed.items():
         if key in roundtripped:
-            assert roundtripped[key] == value, (
-                f"plan list returned {key}={roundtripped[key]!r} but seed had {value!r}"
-            )
+            assert roundtripped[key] == value, f"plan list returned {key}={roundtripped[key]!r} but seed had {value!r}"
 
 
 def test_plan_list_filter_by_status(tmp_path, capsys):
