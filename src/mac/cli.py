@@ -97,8 +97,11 @@ def _build_parser() -> argparse.ArgumentParser:
     tasks.add_argument("--agent-id")
     tasks.add_argument("--project-context")
 
-    plan = subcommands.add_parser("plan", help="Manage collaboration plans")
-    plan_subcommands = plan.add_subparsers(dest="plan_command", required=True)
+    plan = subcommands.add_parser("plan", help="Manage collaboration plans (bare = list)")
+    plan.add_argument("--db", default="mac.db")
+    plan.add_argument("--status", default=None)
+    plan_subcommands = plan.add_subparsers(dest="plan_command")
+    plan.set_defaults(plan_command="list", db="mac.db", status=None)
     plan_create = plan_subcommands.add_parser("create", help="Create a collaboration plan")
     plan_create.add_argument("--db", default="mac.db")
     plan_create.add_argument("--plan-id")
@@ -142,7 +145,9 @@ def _build_parser() -> argparse.ArgumentParser:
     record_conflict.add_argument("--task-id")
     record_conflict.add_argument("--source", required=True)
     record_conflict.add_argument("--severity", choices=["blocking", "non_blocking"], default="non_blocking")
-    record_conflict.add_argument("--description", required=True)
+    desc_grp = record_conflict.add_mutually_exclusive_group(required=True)
+    desc_grp.add_argument("--description", help="Conflict description (canonical flag, matches ConflictRecord schema)")
+    desc_grp.add_argument("--reason", help="Alias for --description")
     record_conflict.add_argument("--agent", action="append", default=[])
     record_conflict.add_argument("--file", action="append", default=[])
 
@@ -249,9 +254,11 @@ def _build_parser() -> argparse.ArgumentParser:
     cancel.add_argument("--agent-id", required=True)
     cancel.add_argument("--reason", default="")
 
-    audit = subcommands.add_parser("audit", help="Print audit trail by trace id")
+    audit = subcommands.add_parser("audit", help="Print audit trail by trace id or task id")
     audit.add_argument("--db", default="mac.db")
-    audit.add_argument("--trace-id", required=True)
+    audit_group = audit.add_mutually_exclusive_group(required=True)
+    audit_group.add_argument("--trace-id", help="Trace ID to look up")
+    audit_group.add_argument("--task-id", help="Task ID; trace ID is resolved via Registry.get_task()")
 
     expire = subcommands.add_parser("expire-stale", help="Expire tasks past their TTL")
     expire.add_argument("--db", default="mac.db")
@@ -602,7 +609,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "task_id": args.task_id,
             "source": args.source,
             "severity": args.severity,
-            "description": args.description,
+            "description": args.description or args.reason,
             "involved_agents": args.agent,
             "involved_files": args.file,
         }
@@ -834,7 +841,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
 
-        entries = Registry(SQLiteStorage(Path(args.db))).get_audit_trail(args.trace_id)
+        registry = Registry(SQLiteStorage(Path(args.db)))
+        trace_id = args.trace_id
+        if trace_id is None:
+            task = registry.get_task(args.task_id)
+            if task is None:
+                _print_json({"error": "task_not_found", "task_id": args.task_id})
+                return 1
+            trace_id = task.trace_id
+        entries = registry.get_audit_trail(trace_id)
         _print_json([entry.model_dump(mode="json") for entry in entries])
         return 0
 
