@@ -12,6 +12,7 @@ query, audit, and replay.
 | `agent.started`     | `accept_handoff` + `start_task` (status: running)         |
 | `agent.commented`   | `record_checkpoint` (trace only, no state change)          |
 | `agent.completed`   | `done` with `HandoffResult` (changed_files, risks, etc.)  |
+| `agent.heartbeat`   | `heartbeat_agent` (refresh status/load/last_heartbeat)    |
 | `agent.failed`      | `fail_task` (status: failed)                              |
 
 Idempotent: duplicate `agent.started` events swallow `StateConflictError`.

@@ -29,6 +29,7 @@ EXAMPLE_DIR = (
     Path(__file__).resolve().parent.parent / "examples" / "multica_bridge"
 )
 sys.path.insert(0, str(EXAMPLE_DIR))
+from mac.protocol.messages import AgentCard  # noqa: E402  (after sys.path insert is fine)
 
 
 @pytest.fixture
@@ -564,3 +565,126 @@ def test_agent_card_absent_keeps_old_behavior(isolated_client, isolated_bridge, 
     # No agent card in the ledger (the registry returns None for agents
     # it has never seen).
     assert isolated_bridge.registry.get_agent("claude-frontend") is None
+
+
+
+# ---------------------------------------------------------------------------
+# Round 7: agent heartbeat (event + HTTP endpoint) and GET /agents
+# ---------------------------------------------------------------------------
+
+
+def test_heartbeat_event_refreshes_card(isolated_client, isolated_bridge):
+    """agent.heartbeat must call Registry.heartbeat_agent and surface
+    the refreshed load / status / last_heartbeat in the response."""
+    isolated_bridge.registry.register(
+        AgentCard(agent_id="hb-1", name="HB-1"),
+    )
+    before = isolated_bridge.registry.get_agent("hb-1")
+    assert before.load == 0  # AgentCard default
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.heartbeat",
+            "data": {"agent_id": "hb-1", "load": 73, "status": "busy"},
+        },
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["status"] == "heartbeated"
+    assert payload["load"] == 73
+    assert payload["card_status"] == "busy"
+    assert payload["last_heartbeat"] >= before.last_heartbeat
+    after = isolated_bridge.registry.get_agent("hb-1")
+    assert after.load == 73
+    assert after.status == "busy"
+
+
+def test_heartbeat_event_unknown_agent_returns_structured_error(
+    isolated_client, isolated_bridge,
+):
+    """Heartbeat for an agent that has never been registered must NOT
+    auto-create a card; it must surface a structured error so the
+    caller can diagnose the misconfiguration."""
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.heartbeat",
+            "data": {"agent_id": "ghost", "load": 50},
+        },
+    )
+    assert r.status_code == 200  # webhook stays 200; error is in body
+    payload = r.json()
+    assert payload["status"] == "error"
+    assert payload["error"] == "unknown_agent"
+    assert payload["agent_id"] == "ghost"
+    # The ledger must not have auto-registered a zombie card.
+    assert isolated_bridge.registry.get_agent("ghost") is None
+
+
+def test_heartbeat_event_missing_agent_id(isolated_client):
+    """If agent_id is absent from the heartbeat payload we must not
+    blow up; return a structured error."""
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={"type": "agent.heartbeat", "data": {}},
+    )
+    assert r.status_code == 200
+    assert r.json() == {"status": "error", "error": "missing_agent_id"}
+
+
+def test_http_heartbeat_endpoint_refreshes_card(isolated_client, isolated_bridge):
+    """POST /agents/<id>/heartbeat must work for already-registered
+    agents and surface the refreshed fields."""
+    isolated_bridge.registry.register(AgentCard(agent_id="hb-http", name="HB-HTTP"))
+    r = isolated_client.post(
+        "/agents/hb-http/heartbeat",
+        json={"load": 42, "status": "online"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["agent_id"] == "hb-http"
+    assert body["load"] == 42
+    assert body["status"] == "online"
+    assert body["last_heartbeat"] > 0
+
+
+def test_http_heartbeat_endpoint_unknown_returns_404(isolated_client):
+    """Unknown agent must yield a structured 404 (FastAPI HTTPException)."""
+    r = isolated_client.post("/agents/no-such-agent/heartbeat", json={"load": 10})
+    assert r.status_code == 404
+    # FastAPI's HTTPException wraps detail in {"detail": ...}
+    body = r.json()
+    assert body["detail"]["error"] == "unknown_agent"
+    assert body["detail"]["agent_id"] == "no-such-agent"
+
+
+def test_http_heartbeat_endpoint_empty_body_uses_defaults(isolated_client, isolated_bridge):
+    """POST with no body or empty body should default status='online'
+    and leave load untouched (None in heartbeat_agent)."""
+    isolated_bridge.registry.register(AgentCard(agent_id="hb-def", name="HB-DEF"))
+    before = isolated_bridge.registry.get_agent("hb-def")
+    r = isolated_client.post("/agents/hb-def/heartbeat")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "online"
+    # load was not provided, so heartbeat_agent keeps the existing value
+    after = isolated_bridge.registry.get_agent("hb-def")
+    assert after.load == before.load
+
+
+def test_list_agents_endpoint_returns_registered_cards(isolated_client, isolated_bridge):
+    """GET /agents must list all registered cards with their heartbeat
+    state. Empty when nothing is registered."""
+    r = isolated_client.get("/agents")
+    assert r.status_code == 200
+    assert r.json() == {"count": 0, "agents": []}
+    isolated_bridge.registry.register(AgentCard(agent_id="a1", name="A1"))
+    isolated_bridge.registry.register(AgentCard(agent_id="a2", name="A2", load=33))
+    r = isolated_client.get("/agents")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    ids = {a["agent_id"] for a in body["agents"]}
+    assert ids == {"a1", "a2"}
+    a2 = next(a for a in body["agents"] if a["agent_id"] == "a2")
+    assert a2["load"] == 33

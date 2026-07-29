@@ -462,6 +462,40 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _on_agent_heartbeat(data: dict[str, Any]) -> dict[str, Any]:
+    """Refresh an agent's status / load / last_heartbeat in the ledger.
+
+    Multica sends these periodically so MAC can keep its scheduling
+    ranking fresh (claim_next_task sorts by -load among candidates with
+    the required capability). Heartbeat for an unknown agent returns a
+    structured error rather than auto-creating a card -- heartbeat is
+    meant to refresh an existing registration, not to register; the
+    canonical registration event remains agent.started.
+    """
+    agent_id = data.get("agent_id", "")
+    if not agent_id:
+        return {"status": "error", "error": "missing_agent_id"}
+    try:
+        refreshed = registry.heartbeat_agent(
+            agent_id,
+            status=data.get("status", "online"),
+            load=data.get("load"),
+        )
+        return {
+            "status": "heartbeated",
+            "agent_id": agent_id,
+            "load": refreshed.load,
+            "card_status": refreshed.status,
+            "last_heartbeat": refreshed.last_heartbeat,
+        }
+    except KeyError:
+        return {
+            "status": "error",
+            "error": "unknown_agent",
+            "agent_id": agent_id,
+        }
+
+
 def _on_agent_failed(data: dict[str, Any]) -> dict[str, Any]:
     tid = _task_id(data["issue_id"])
     return {
@@ -477,6 +511,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "agent.started": _on_agent_started,
     "agent.commented": _on_agent_commented,
     "agent.completed": _on_agent_completed,
+    "agent.heartbeat": _on_agent_heartbeat,
     "agent.failed": _on_agent_failed,
 }
 
@@ -508,6 +543,58 @@ async def multica_webhook(request: Request) -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/agents")
+def list_agents() -> dict[str, Any]:
+    """List registered agents (with their last heartbeat and load).
+
+    Operators use this to see which agents are currently known to MAC
+    and decide whether to investigate stale ones. Cheap query -- reads
+    directly from the ledger.
+    """
+    agents = registry.ledger.list_agent_cards()
+    return {
+        "count": len(agents),
+        "agents": [
+            {
+                "agent_id": a.agent_id,
+                "name": a.name,
+                "status": a.status,
+                "load": a.load,
+                "last_heartbeat": a.last_heartbeat,
+                "capabilities": [c.name for c in (a.capabilities or [])],
+            }
+            for a in agents
+        ],
+    }
+
+
+@app.post("/agents/{agent_id}/heartbeat")
+def heartbeat_agent(agent_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Synchronous heartbeat endpoint for agents that prefer HTTP over
+    Multica webhooks. Body (optional): ``{"status": "online"|"busy"|"offline",
+    "load": 0..100}``. Returns 404 with a structured body if the agent
+    is not registered; 200 with the refreshed card otherwise.
+    """
+    body = payload or {}
+    try:
+        refreshed = registry.heartbeat_agent(
+            agent_id,
+            status=body.get("status", "online"),
+            load=body.get("load"),
+        )
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_agent", "agent_id": agent_id},
+        )
+    return {
+        "agent_id": refreshed.agent_id,
+        "status": refreshed.status,
+        "load": refreshed.load,
+        "last_heartbeat": refreshed.last_heartbeat,
+    }
 
 
 # ----- CLI / demo -------------------------------------------------------------
