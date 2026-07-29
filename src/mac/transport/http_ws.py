@@ -138,7 +138,7 @@ class CleanupTasksRequest(BaseModel):
 
 
 def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
-    app = FastAPI(title="Multi-Agent Coordinator", version="0.9.0")
+    app = FastAPI(title="Multi-Agent Coordinator", version="1.0.0")
     expected_token = token if token is not None else os.getenv("MAC_HTTP_TOKEN")
 
     if expected_token:
