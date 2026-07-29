@@ -1,6 +1,6 @@
 Set-Location 'D:\WorkSpace\multi-agent-coordinator'
 $env:PYTHONPATH = "D:\WorkSpace\multi-agent-coordinator\src"
-$env:MAC_DB = "mac.db"
+$env:MAC_DB_PATH = "mac.db"
 Remove-Item mac.db, server.out, server.err -ErrorAction SilentlyContinue
 $proc = Start-Process -FilePath python -ArgumentList "examples\multica_bridge\server.py" -RedirectStandardOutput server.out -RedirectStandardError server.err -PassThru -WindowStyle Hidden
 Start-Sleep -Seconds 4

@@ -44,7 +44,7 @@ from mac.registry import Registry
 from mac.storage.sqlite import SQLiteTaskLedger
 
 
-DB_PATH = os.environ.get("MAC_DB", "mac.db")
+DB_PATH = os.environ.get("MAC_DB_PATH", "mac.db")
 WEBHOOK_SECRET = os.environ.get("MULTICA_WEBHOOK_SECRET", "")
 LISTEN_HOST = os.environ.get("BRIDGE_HOST", "127.0.0.1")
 LISTEN_PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
@@ -54,6 +54,7 @@ app = FastAPI(title="MAC-Multica Bridge", version="0.1.0")
 
 
 # ----- helpers ----------------------------------------------------------------
+
 
 def _task_id(issue_id: str) -> str:
     return "multica-" + issue_id
@@ -67,6 +68,7 @@ def _verify(body: bytes, signature: str) -> bool:
 
 
 # ----- event handlers ---------------------------------------------------------
+
 
 def _on_issue_created(data: dict[str, Any]) -> dict[str, Any]:
     issue_id = data["issue_id"]
@@ -161,6 +163,7 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 
 # ----- webhook entry point ----------------------------------------------------
 
+
 @app.post("/webhook/multica")
 async def multica_webhook(request: Request) -> dict[str, Any]:
     body = await request.body()
@@ -180,37 +183,62 @@ def healthz() -> dict[str, str]:
 
 # ----- CLI / demo -------------------------------------------------------------
 
+
 def _demo() -> int:
     """Drive the handlers with synthetic events; no HTTP server needed."""
     sample = [
-        {"type": "issue.created", "data": {
-            "issue_id": "DEMO-1", "title": "Fix auth race",
-            "url": "https://multica/issues/DEMO-1",
-            "acceptance_criteria": ["No double-login"],
-            "target_files": ["src/auth.py"],
-        }},
-        {"type": "agent.started", "data": {
-            "issue_id": "DEMO-1", "agent_id": "claude-frontend",
-        }},
-        {"type": "agent.commented", "data": {
-            "issue_id": "DEMO-1", "agent_id": "claude-frontend",
-            "body": "Reprod locally",
-        }},
-        {"type": "agent.completed", "data": {
-            "issue_id": "DEMO-1", "agent_id": "claude-frontend",
-            "changed_files": ["src/auth.py"],
-            "verification": "pytest:pass",
-            "risks": ["manual browser check pending"],
-        }},
-        {"type": "issue.created", "data": {
-            "issue_id": "DEMO-2", "title": "Refactor ledger schema",
-            "url": "https://multica/issues/DEMO-2",
-        }},
-        {"type": "agent.failed", "data": {
-            "issue_id": "DEMO-2", "agent_id": "codex-migrator",
-            "error_code": "build_broken",
-            "message": "compilation error in registry.py:42",
-        }},
+        {
+            "type": "issue.created",
+            "data": {
+                "issue_id": "DEMO-1",
+                "title": "Fix auth race",
+                "url": "https://multica/issues/DEMO-1",
+                "acceptance_criteria": ["No double-login"],
+                "target_files": ["src/auth.py"],
+            },
+        },
+        {
+            "type": "agent.started",
+            "data": {
+                "issue_id": "DEMO-1",
+                "agent_id": "claude-frontend",
+            },
+        },
+        {
+            "type": "agent.commented",
+            "data": {
+                "issue_id": "DEMO-1",
+                "agent_id": "claude-frontend",
+                "body": "Reprod locally",
+            },
+        },
+        {
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DEMO-1",
+                "agent_id": "claude-frontend",
+                "changed_files": ["src/auth.py"],
+                "verification": "pytest:pass",
+                "risks": ["manual browser check pending"],
+            },
+        },
+        {
+            "type": "issue.created",
+            "data": {
+                "issue_id": "DEMO-2",
+                "title": "Refactor ledger schema",
+                "url": "https://multica/issues/DEMO-2",
+            },
+        },
+        {
+            "type": "agent.failed",
+            "data": {
+                "issue_id": "DEMO-2",
+                "agent_id": "codex-migrator",
+                "error_code": "build_broken",
+                "message": "compilation error in registry.py:42",
+            },
+        },
     ]
     for ev in sample:
         etype = ev["type"]
@@ -220,11 +248,29 @@ def _demo() -> int:
     return 0
 
 
+def _check_bind_safety() -> None:
+    """Refuse non-loopback binds when HMAC secret is unset.
+
+    The webhook falls open (skip signature verification) when
+    MULTICA_WEBHOOK_SECRET is empty, so binding to anything
+    other than localhost in that mode would expose the bridge
+    to unsigned requests. Bail loudly instead.
+    """
+    if not WEBHOOK_SECRET and LISTEN_HOST not in ("127.0.0.1", "::1", "localhost"):
+        sys.exit(
+            "refusing to bind to non-loopback host without "
+            "MULTICA_WEBHOOK_SECRET set. Either set the env var "
+            "or run with BRIDGE_HOST=127.0.0.1."
+        )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Multica -> MAC webhook bridge")
     parser.add_argument("--demo", action="store_true", help="run synthetic events without HTTP")
     args = parser.parse_args()
     if args.demo:
         sys.exit(_demo())
+    _check_bind_safety()
     import uvicorn
+
     uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT)

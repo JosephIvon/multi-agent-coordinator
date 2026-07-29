@@ -98,7 +98,6 @@ requests.get("http://127.0.0.1:8765/healthz").json()
 
 ```
 examples/multica_bridge/
-    __init__.py        # empty (makes this importable as a package)
     server.py          # 200-line bridge: FastAPI app + handlers + demo
     README.md          # this file
     _smoke2.ps1        # canonical end-to-end smoke test (PowerShell)

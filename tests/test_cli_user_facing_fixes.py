@@ -163,6 +163,42 @@ def test_plan_list_still_works_explicitly(tmp_path, capsys):
     assert explicit == []
 
 
+def test_plan_list_returns_seeded_plan(tmp_path, capsys):
+    """`plan list` must surface plans created via `plan create`, not just `[]`.
+
+    This guards the bare-plan default-subcommand routing: if the
+    dispatch ever silently routes to the wrong handler, this test
+    will catch it by checking data round-trip rather than just
+    exit code.
+    """
+    db = tmp_path / "mac.db"
+    _registered_agent(db, capsys)
+
+    seed_goal = "ship-v1-1"
+    assert main([
+        "plan", "create",
+        "--db", str(db),
+        "--goal", seed_goal,
+        "--created-by", "review-test",
+    ]) == 0
+    seed = json.loads(capsys.readouterr().out)
+    seeded_id = seed["plan_id"]
+    assert seeded_id
+
+    # bare `plan` defaults to list; the seeded plan must appear
+    assert main(["plan", "--db", str(db)]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert isinstance(listed, list), listed
+    assert len(listed) == 1, listed
+    roundtripped = listed[0]
+    # every shared key between seed and listed record must match
+    for key, value in seed.items():
+        if key in roundtripped:
+            assert roundtripped[key] == value, (
+                f"plan list returned {key}={roundtripped[key]!r} but seed had {value!r}"
+            )
+
+
 def test_plan_list_filter_by_status(tmp_path, capsys):
     db = tmp_path / "mac.db"
 
