@@ -169,16 +169,26 @@ examples/multica_bridge/
   `{"status": "boundary_violation", "violations": [...]}` so Multica gets
   the structured refusal and the reverse channel is skipped. Agents without
   any declared path patterns stay permissive (backward compatible).
+- **Severity upgrade for guarded modules**: when the bridge has a non-empty
+  `MULTICA_GUARDED_PATHS` env var (e.g. `auth/*,secrets/*,db/migrations/*`),
+  any file-overlap conflict whose `changed_files` match a guarded glob is
+  recorded with `severity="blocking"` and rendered in a separate
+  `## Blocking Conflicts` section of the review packet. Non-guarded overlaps
+  remain `non_blocking` and stay under `## Open Conflicts (non-blocking)`.
+  When `MULTICA_GUARDED_PATHS` is empty (default), every overlap stays
+  non-blocking and the review packet keeps a single section, so existing
+  deployments see no behaviour change.
 
 ## Next steps if you keep building
 
-1. **Severity upgrade for high-risk overlaps**: bump `severity` to
-   `blocking` for paths under guarded modules and have `done()` refuse the
-   transition (currently all overlaps are `non_blocking`).
-2. **Conflict-aware review routing**: surface blocking conflicts in the
-   `## Open Conflicts` section of the review packet so reviewers see them
-   without a separate query.
-3. **Agent card sync from Multica**: today the bridge leaves
+1. **Conflict-aware review routing**: when a guard produces blocking
+   conflicts, refuse the `done()` transition rather than just surfacing the
+   conflict in the review packet. Today blocking is informational only.
+2. **Agent card sync from Multica**: today the bridge leaves
    `allowed_paths` / `forbidden_paths` unset unless the operator registers
    the agent in MAC by hand. Wiring Multica's agent roster into
    `Registry.register(...)` would turn enforcement on automatically.
+3. **Audit-trail shipping**: every webhook handler currently logs at DEBUG;
+   sending the audit trail (and conflict events) into Multica as issue
+   comments would let reviewers see the full lifecycle without a separate
+   mac-agent CLI round-trip.

@@ -69,6 +69,11 @@ LISTEN_PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
 MULTICA_API_URL = os.environ.get("MULTICA_API_URL", "").rstrip("/")
 MULTICA_API_TOKEN = os.environ.get("MULTICA_API_TOKEN", "")
 REVIEW_FALLBACK_DIR = os.environ.get("REVIEW_FALLBACK_DIR", ".agent-context/review-fallback")
+GUARDED_PATTERNS = [
+    p.strip()
+    for p in os.environ.get("MULTICA_GUARDED_PATHS", "").split(",")
+    if p.strip()
+]
 
 logger = logging.getLogger("multica_bridge")
 
@@ -136,19 +141,28 @@ def _format_review_packet(
     else:
         lines.append("- (none recorded)")
     lines.append("")
-    lines.append("## Open Conflicts")
-    if conflicts:
-        for _c in conflicts:
+    blocking = [c for c in (conflicts or []) if c.get("severity") == "blocking"]
+    other = [c for c in (conflicts or []) if c.get("severity") != "blocking"]
+    lines.append("## Blocking Conflicts")
+    if blocking:
+        for _c in blocking:
+            _files = ", ".join(_c.get("involved_files") or [])
+            _agents = ", ".join(sorted(_c.get("involved_agents") or []))
+            _cid = _c.get("conflict_id", "?")
+            _desc = _c.get("description", "")
+            lines.append("- **" + _cid + "**: " + _desc + " | files: " + _files + " | agents: " + _agents)
+    else:
+        lines.append("- None")
+    lines.append("")
+    lines.append("## Open Conflicts (non-blocking)")
+    if other:
+        for _c in other:
             _files = ", ".join(_c.get("involved_files") or [])
             _agents = ", ".join(sorted(_c.get("involved_agents") or []))
             _cid = _c.get("conflict_id", "?")
             _src = _c.get("source", "?")
             _desc = _c.get("description", "")
-            lines.append(
-                "- " + _cid + " (" + _src + "): " + _desc
-                + " | files: " + _files
-                + " | agents: " + _agents
-            )
+            lines.append("- " + _cid + " (" + _src + "): " + _desc + " | files: " + _files + " | agents: " + _agents)
     else:
         lines.append("- None")
     return chr(10).join(lines) + chr(10)
@@ -286,6 +300,7 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
         handoff=handoff,
         detect_conflicts=True,
         enforce_boundaries=True,
+        guarded_patterns=GUARDED_PATTERNS or None,
     )
     # Reverse channel: post the review packet back to Multica so the
     # original issue shows the structured handoff. Failures are

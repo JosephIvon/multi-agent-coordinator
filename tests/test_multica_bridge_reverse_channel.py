@@ -265,6 +265,62 @@ def test_boundary_violation_returns_structured_200(isolated_client, isolated_bri
     assert isolated_bridge.registry.get_handoff_result("multica-BV-1") is None
 
 
+def test_blocking_conflicts_segregated_in_review_packet(
+    isolated_client, isolated_bridge, monkeypatch
+):
+    """Guarded overlap is recorded with severity=blocking and rendered
+    under a separate "## Blocking Conflicts" header in the review packet.
+    """
+    monkeypatch.setattr(isolated_bridge, "GUARDED_PATTERNS", ["secrets/*"])
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
+    _seed_submitted_task(isolated_client, "GD-1")
+    _seed_submitted_task(isolated_client, "GD-2")
+    # Complete GD-1 first (no reverse channel).
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "GD-1",
+                "agent_id": "claude-shared",
+                "changed_files": ["secrets/key.pem"],
+                "verification": "pytest:pass",
+                "risks": [],
+            },
+        },
+    )
+    assert r.status_code == 200
+    # Wire the reverse channel and complete GD-2 with the SAME guarded file.
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+    monkeypatch.setattr(
+        isolated_bridge.urllib.request, "urlopen",
+        lambda *a, **kw: (captured.append(a[0].data.decode("utf-8")) or _FakeResponse(201)),
+    )
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "GD-2",
+                "agent_id": "claude-shared",
+                "changed_files": ["secrets/key.pem"],
+                "verification": "pytest:pass",
+                "risks": [],
+            },
+        },
+    )
+    body = r.json()
+    assert body["status"] == "completed"
+    assert any(c["severity"] == "blocking" for c in body["conflicts"])
+    assert captured
+    packet = json.loads(captured[0])["body"]
+    assert "## Blocking Conflicts" in packet
+    assert "## Open Conflicts (non-blocking)" in packet
+    assert "secrets/key.pem" in packet
+    assert "BLOCKING" in packet
+
+
 def test_review_packet_includes_file_overlap_conflicts(isolated_client, isolated_bridge, monkeypatch):
     _seed_submitted_task(isolated_client, "OVR-1")
     _seed_submitted_task(isolated_client, "OVR-2")

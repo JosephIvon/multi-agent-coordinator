@@ -1,0 +1,37 @@
+feat(registry,bridge): severity upgrade for guarded-module overlaps
+
+Round 3 of the Multica bridge roadmap.
+
+- Add opt-in ``guarded_patterns: list[str] | None = None`` kw-only to
+  ``Registry.detect_file_overlap_conflicts``. When any ``changed_file``
+  matches a guarded glob (same syntax as ``AgentCard.forbidden_paths``)
+  the corresponding conflict is recorded with ``severity="blocking"``
+  and its description is rewritten to make the BLOCKING status obvious.
+  Paths that do not match any guarded pattern stay
+  ``non_blocking`` (backward compatible).
+- Plumb the same parameter through ``Registry.done(..., guarded_patterns=...)``
+  so the bridge can opt in via a single keyword.
+- Bridge:
+  * Read ``MULTICA_GUARDED_PATHS`` (comma-separated globs, e.g.
+    ``auth/*,secrets/*,db/migrations/*``) at import time and forward it
+    to ``done()``.
+  * Split the review packet's ``## Open Conflicts`` section into two:
+    ``## Blocking Conflicts`` (bold-formatted, comes first) and
+    ``## Open Conflicts (non-blocking)``. Empty list per section still
+    renders as ``- None`` so the markdown stays parseable.
+- Update ``examples/multica_bridge/README.md``: move "Severity upgrade
+  for high-risk overlaps" out of "Next steps" into "What this PoC does
+  now"; rewrite the remaining next-steps list around blocking-aware
+  review routing and agent-card sync.
+- Tests:
+  * ``tests/test_file_overlap_conflicts.py`` (3 new tests): guarded
+    overlap records blocking severity with a BLOCKING tag in the
+    description; unguarded overlap stays non-blocking even when guarded
+    patterns are configured; mixed paths split into two distinct
+    conflicts with different severities.
+  * ``tests/test_multica_bridge_reverse_channel.py`` (1 new test):
+    end-to-end "guarded overlap -> severity=blocking in JSON response,
+    ## Blocking Conflicts section in markdown packet".
+- All 326 tests pass, 1 skipped.
+
+Tested locally; no live Multica instance required.

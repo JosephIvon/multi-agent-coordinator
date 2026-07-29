@@ -116,3 +116,42 @@ def test_failed_other_task_excluded(tmp_path):
     registry.fail_task('task-b', 'b', error_code='x', message='m')
     created = registry.detect_file_overlap_conflicts('task-a')
     assert created == []
+
+def test_guarded_path_overlap_records_blocking_severity(tmp_path):
+    """An overlap touching a guarded glob pattern is recorded as blocking."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _run_task(registry, "task-a", "a", ["secrets/key.pem"])
+    _run_task(registry, "task-b", "b", ["secrets/key.pem"])
+    created = registry.detect_file_overlap_conflicts(
+        "task-a", guarded_patterns=["secrets/*"]
+    )
+    assert len(created) == 1
+    assert created[0].severity == "blocking"
+    assert "BLOCKING" in created[0].description
+
+
+def test_unguarded_overlap_stays_non_blocking(tmp_path):
+    """Without guarded_patterns, overlaps stay non_blocking even if a
+    guarded_patterns list happens to be provided but no path matches."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _run_task(registry, "task-a", "a", ["src/shared.py"])
+    _run_task(registry, "task-b", "b", ["src/shared.py"])
+    created = registry.detect_file_overlap_conflicts(
+        "task-a", guarded_patterns=["secrets/*"]
+    )
+    assert len(created) == 1
+    assert created[0].severity == "non_blocking"
+
+
+def test_mixed_paths_split_blocking_and_non_blocking(tmp_path):
+    """An overlap that touches both a guarded and an unguarded path
+    produces two distinct conflicts with different severities."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _run_task(registry, "task-a", "a", ["secrets/key.pem", "src/shared.py"])
+    _run_task(registry, "task-b", "b", ["secrets/key.pem", "src/shared.py"])
+    created = registry.detect_file_overlap_conflicts(
+        "task-a", guarded_patterns=["secrets/*"]
+    )
+    by_file = {c.involved_files[0]: c for c in created}
+    assert by_file["secrets/key.pem"].severity == "blocking"
+    assert by_file["src/shared.py"].severity == "non_blocking"

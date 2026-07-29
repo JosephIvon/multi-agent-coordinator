@@ -475,6 +475,7 @@ class Registry:
         handoff: HandoffResult | None = None,
         detect_conflicts: bool = False,
         enforce_boundaries: bool = False,
+        guarded_patterns: list[str] | None = None,
     ) -> dict[str, Any]:
         """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
 
@@ -550,7 +551,9 @@ class Registry:
                 "review": True,
             }
             if detect_conflicts:
-                conflicts = self.detect_file_overlap_conflicts(task_id)
+                conflicts = self.detect_file_overlap_conflicts(
+                    task_id, guarded_patterns=guarded_patterns,
+                )
                 if conflicts:
                     result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
             return result
@@ -566,7 +569,9 @@ class Registry:
             "review": False,
         }
         if detect_conflicts:
-            conflicts = self.detect_file_overlap_conflicts(task_id)
+            conflicts = self.detect_file_overlap_conflicts(
+                task_id, guarded_patterns=guarded_patterns,
+            )
             if conflicts:
                 result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
         return result
@@ -761,7 +766,12 @@ class Registry:
     ) -> list[ConflictRecord]:
         return self.ledger.list_conflicts(plan_id=plan_id, resolved=resolved)
 
-    def detect_file_overlap_conflicts(self, task_id: str) -> list[ConflictRecord]:
+    def detect_file_overlap_conflicts(
+        self,
+        task_id: str,
+        *,
+        guarded_patterns: list[str] | None = None,
+    ) -> list[ConflictRecord]:
         """Scan the ledger for tasks whose changed_files overlap with the given task.
 
         For each (this_task, other_task) pair where both have a HandoffResult
@@ -774,6 +784,13 @@ class Registry:
         duplicate conflicts. A conflict is identified by its deterministic
         conflict_id of the form "overlap:{sorted_pair_id}:{path}".
 
+        :param guarded_patterns: Optional list of glob patterns (same
+            syntax as ``AgentCard.forbidden_paths``). When a path matches any
+            of these patterns the corresponding conflict is recorded with
+            ``severity="blocking"`` instead of the default
+            ``"non_blocking"``. Callers (e.g. the Multica bridge) use this to
+            flag overlaps in security-sensitive modules like auth/,
+            secrets/, or db/migrations/.
         :returns: Newly created ConflictRecord objects (already persisted).
             Empty when no overlap is found or the task has no handoff yet.
         """
@@ -800,16 +817,31 @@ class Registry:
                 cid = f"overlap:{_sorted_pair_id(task_id, other.task_id)}:{path}"
                 if self.ledger.get_conflict(cid) is not None:
                     continue
+                normalized_path = path.replace("\\", "/")
+                hit_guard = next(
+                    (
+                        p
+                        for p in (guarded_patterns or [])
+                        if _glob_match(normalized_path, p)
+                    ),
+                    None,
+                )
+                severity = "blocking" if hit_guard is not None else "non_blocking"
+                description = (
+                    f"Tasks {task_id} and {other.task_id} both report "
+                    f"{path!r} in changed_files under guarded module "
+                    f"{hit_guard!r}; this is a BLOCKING conflict."
+                ) if hit_guard else (
+                    f"Tasks {task_id} and {other.task_id} both report "
+                    f"{path!r} in changed_files; review for merge conflicts."
+                )
                 conflict = ConflictRecord(
                     conflict_id=cid,
                     plan_id=current_task.plan_id or other.plan_id,
                     task_id=task_id,
                     source="file_overlap",
-                    severity="non_blocking",
-                    description=(
-                        f"Tasks {task_id} and {other.task_id} both report "
-                        f"{path!r} in changed_files; review for merge conflicts."
-                    ),
+                    severity=severity,
+                    description=description,
                     involved_agents=sorted({handoff.agent_id, other_handoff.agent_id}),
                     involved_files=[path],
                 )
