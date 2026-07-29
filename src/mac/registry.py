@@ -27,6 +27,16 @@ from mac.storage import SQLiteTaskLedger, StatusConflict
 from mac.testing.contracts import TestContract
 
 
+def _sorted_pair_id(a: str, b: str) -> str:
+    """Stable id for an unordered pair of task ids.
+
+    Used to derive deterministic ConflictRecord.conflict_id values so
+    re-running file-overlap detection on the same (task_a, task_b, path)
+    tuple does not create duplicate conflicts.
+    """
+    return f"{min(a, b)}|{max(a, b)}"
+
+
 class Registry:
     def __init__(
         self,
@@ -459,6 +469,7 @@ class Registry:
         *,
         quality_result: dict[str, Any] | None = None,
         handoff: HandoffResult | None = None,
+        detect_conflicts: bool = False,
     ) -> dict[str, Any]:
         """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
 
@@ -473,8 +484,16 @@ class Registry:
             quality results are used for gate evaluation.
         :param handoff: Optional :class:`HandoffResult` to save before
             completing / marking review-ready.
+        :param detect_conflicts: When True, after a successful transition
+            (completed or review_ready) scan the ledger for tasks whose
+            changed_files overlap with this task handoff and record a
+            ConflictRecord for each overlap. Defaults to False to keep
+            the hot path cheap; opt in when callers want automatic conflict
+            surfacing (e.g. the Multica webhook bridge).
         :returns: A summary dict with keys ``status``, ``task_id``,
-            ``quality_gate``, and optionally ``review`` and ``reason``.
+            ``quality_gate``, and optionally ``review``, ``reason``, and
+            ``conflicts`` (only when detect_conflicts=True and the task
+            completed successfully).
         """
         # 1. Submit quality evidence if provided.
         if quality_result is not None:
@@ -499,23 +518,33 @@ class Registry:
         if self.policy.require_review:
             # mark_review_ready() saves handoff internally when provided.
             self.mark_review_ready(task_id, agent_id, handoff=handoff)
-            return {
+            result = {
                 "status": "review_ready",
                 "task_id": task_id,
                 "quality_gate": "passed",
                 "review": True,
             }
+            if detect_conflicts:
+                conflicts = self.detect_file_overlap_conflicts(task_id)
+                if conflicts:
+                    result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
+            return result
 
         # No review required: save handoff first, then complete.
         if handoff is not None:
             self.save_handoff_result(handoff)
         self.complete_task(task_id, agent_id)
-        return {
+        result = {
             "status": "completed",
             "task_id": task_id,
             "quality_gate": "passed",
             "review": False,
         }
+        if detect_conflicts:
+            conflicts = self.detect_file_overlap_conflicts(task_id)
+            if conflicts:
+                result["conflicts"] = [c.model_dump(mode="json") for c in conflicts]
+        return result
 
     # ------------------------------------------------------------------
     # Reviewer capability guard (B-5)
@@ -706,6 +735,61 @@ class Registry:
         resolved: bool | None = None,
     ) -> list[ConflictRecord]:
         return self.ledger.list_conflicts(plan_id=plan_id, resolved=resolved)
+
+    def detect_file_overlap_conflicts(self, task_id: str) -> list[ConflictRecord]:
+        """Scan the ledger for tasks whose changed_files overlap with the given task.
+
+        For each (this_task, other_task) pair where both have a HandoffResult
+        and their changed_files intersect, record a ConflictRecord with
+        source "file_overlap". Only tasks in completed or
+        review_ready status are considered as the "other" side; the current
+        task itself is excluded.
+
+        Detection is idempotent: re-running on the same task does not create
+        duplicate conflicts. A conflict is identified by its deterministic
+        conflict_id of the form "overlap:{sorted_pair_id}:{path}".
+
+        :returns: Newly created ConflictRecord objects (already persisted).
+            Empty when no overlap is found or the task has no handoff yet.
+        """
+        handoff = self.ledger.get_handoff_result(task_id)
+        if handoff is None or not getattr(handoff, "changed_files", None):
+            return []
+        current_task = self.ledger.get_task_transfer(task_id)
+        if current_task is None:
+            return []
+        current_files = set(handoff.changed_files)
+        created: list[ConflictRecord] = []
+        for other in self.ledger.list_task_transfers():
+            if other.task_id == task_id:
+                continue
+            if other.status not in ("completed", "review_ready"):
+                continue
+            other_handoff = self.ledger.get_handoff_result(other.task_id)
+            if other_handoff is None or not getattr(other_handoff, "changed_files", None):
+                continue
+            overlap = current_files & set(other_handoff.changed_files)
+            if not overlap:
+                continue
+            for path in sorted(overlap):
+                cid = f"overlap:{_sorted_pair_id(task_id, other.task_id)}:{path}"
+                if self.ledger.get_conflict(cid) is not None:
+                    continue
+                conflict = ConflictRecord(
+                    conflict_id=cid,
+                    plan_id=current_task.plan_id or other.plan_id,
+                    task_id=task_id,
+                    source="file_overlap",
+                    severity="non_blocking",
+                    description=(
+                        f"Tasks {task_id} and {other.task_id} both report "
+                        f"{path!r} in changed_files; review for merge conflicts."
+                    ),
+                    involved_agents=sorted({handoff.agent_id, other_handoff.agent_id}),
+                    involved_files=[path],
+                )
+                created.append(self.record_conflict(conflict))
+        return created
 
     def cleanup_tasks(
         self,

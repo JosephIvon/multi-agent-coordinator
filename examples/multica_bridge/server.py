@@ -95,6 +95,7 @@ def _format_review_packet(
     task_id: str,
     handoff: HandoffResult,
     quality: dict[str, Any] | None = None,
+    conflicts: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a MAC HandoffResult as a markdown review packet.
 
@@ -136,7 +137,20 @@ def _format_review_packet(
         lines.append("- (none recorded)")
     lines.append("")
     lines.append("## Open Conflicts")
-    lines.append("- None")
+    if conflicts:
+        for _c in conflicts:
+            _files = ", ".join(_c.get("involved_files") or [])
+            _agents = ", ".join(sorted(_c.get("involved_agents") or []))
+            _cid = _c.get("conflict_id", "?")
+            _src = _c.get("source", "?")
+            _desc = _c.get("description", "")
+            lines.append(
+                "- " + _cid + " (" + _src + "): " + _desc
+                + " | files: " + _files
+                + " | agents: " + _agents
+            )
+    else:
+        lines.append("- None")
     return chr(10).join(lines) + chr(10)
 
 
@@ -270,6 +284,7 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
         agent_id,
         quality_result=quality,
         handoff=handoff,
+        detect_conflicts=True,
     )
     # Reverse channel: post the review packet back to Multica so the
     # original issue shows the structured handoff. Failures are
@@ -278,7 +293,10 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
     if result.get("status") in ("completed", "review_ready"):
         issue_id = data["issue_id"]
         try:
-            packet = _format_review_packet(issue_id, tid, handoff, quality)
+            packet = _format_review_packet(
+                issue_id, tid, handoff, quality,
+                conflicts=result.get("conflicts"),
+            )
             _post_review_to_multica(issue_id, packet)
         except Exception as exc:  # last-resort safety net
             logger.exception("reverse channel: unexpected error for %s: %s", issue_id, exc)

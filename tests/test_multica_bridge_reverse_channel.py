@@ -194,3 +194,47 @@ def test_reverse_channel_does_not_run_when_status_not_done(client, bridge, monke
     assert r.status_code == 200
     # agent.failed does NOT trigger reverse channel -- only completed/review_ready do.
     assert captured == []
+
+def test_review_packet_includes_file_overlap_conflicts(client, bridge, monkeypatch):
+    _seed_submitted_task(client, "OVR-1")
+    _seed_submitted_task(client, "OVR-2")
+    # Complete OVR-1 first (no reverse channel) so OVR-2 has something to overlap with.
+    monkeypatch.setattr(bridge, "MULTICA_API_URL", "")
+    payload_1 = {
+        "issue_id": "OVR-1",
+        "agent_id": "claude-shared",
+        "changed_files": ["src/shared.py"],
+        "verification": "pytest:pass",
+        "risks": [],
+    }
+    r = client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_1})
+    assert r.status_code == 200
+
+    # Now wire the reverse channel and complete OVR-2.
+    monkeypatch.setattr(bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+
+    def fake_urlopen(req, timeout=10):
+        captured.append(req.data.decode("utf-8"))
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+
+    payload_2 = {
+        "issue_id": "OVR-2",
+        "agent_id": "claude-shared",
+        "changed_files": ["src/shared.py"],
+        "verification": "pytest:pass",
+        "risks": [],
+    }
+    r = client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_2})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert "conflicts" in body and len(body["conflicts"]) == 1
+    assert captured, "reverse channel should have fired"
+    packet = json.loads(captured[0])["body"]
+    assert "## Open Conflicts" in packet
+    assert "src/shared.py" in packet
+    assert "multica-OVR-1" in packet
+    assert "multica-OVR-2" in packet

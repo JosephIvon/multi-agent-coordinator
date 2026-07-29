@@ -153,11 +153,21 @@ examples/multica_bridge/
 - `mac-agent` CLI (and therefore any non-Multica tool) can query Multica's
   activity through the shared ledger without touching the webhook endpoint.
 
+## What this PoC does now
+
+- **Conflict surfacing**: after every successful `done()` the bridge calls
+  `Registry.detect_file_overlap_conflicts(task_id)`. Any overlap with another
+  `completed` or `review_ready` task's `changed_files` is recorded as a
+  `ConflictRecord` with `source='file_overlap'` and surfaced in the
+  review packet under `## Open Conflicts`. Detection is idempotent via a
+  deterministic `conflict_id` so re-runs do not duplicate rows.
+
 ## Next steps if you keep building
 
-2. **Conflict surfacing**: scan the ledger for two completed tasks whose
-   `changed_files` overlap; raise `ConflictRecord` on each.
-3. **Path boundary enforcement**: refuse to record a `done` whose
+1. **Path boundary enforcement**: refuse to record a `done` whose
    `changed_files` cross the agent's `allowed_paths`.
-4. **Unit tests**: cover each event handler with `pytest` + `httpx.AsyncClient`
-   so future edits don't break the idempotency contract.
+2. **Severity upgrade for high-risk overlaps**: bump `severity` to `blocking`
+   for paths under guarded modules and have `done()` refuse the transition.
+3. **Conflict-aware review routing**: surface blocking conflicts in the
+   `## Open Conflicts` section of the review packet so reviewers see them
+   without a separate query.
