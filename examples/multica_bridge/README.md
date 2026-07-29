@@ -161,13 +161,24 @@ examples/multica_bridge/
   `ConflictRecord` with `source='file_overlap'` and surfaced in the
   review packet under `## Open Conflicts`. Detection is idempotent via a
   deterministic `conflict_id` so re-runs do not duplicate rows.
+- **Path boundary enforcement**: the bridge passes `enforce_boundaries=True`
+  to `Registry.done()`. When the agent's `allowed_paths` / `forbidden_paths`
+  reject the handoff (e.g. an agent touches `secrets/*` despite having that
+  glob listed under `forbidden_paths`), MAC short-circuits before saving the
+  `HandoffResult`. The webhook still returns 200 but with
+  `{"status": "boundary_violation", "violations": [...]}` so Multica gets
+  the structured refusal and the reverse channel is skipped. Agents without
+  any declared path patterns stay permissive (backward compatible).
 
 ## Next steps if you keep building
 
-1. **Path boundary enforcement**: refuse to record a `done` whose
-   `changed_files` cross the agent's `allowed_paths`.
-2. **Severity upgrade for high-risk overlaps**: bump `severity` to `blocking`
-   for paths under guarded modules and have `done()` refuse the transition.
-3. **Conflict-aware review routing**: surface blocking conflicts in the
+1. **Severity upgrade for high-risk overlaps**: bump `severity` to
+   `blocking` for paths under guarded modules and have `done()` refuse the
+   transition (currently all overlaps are `non_blocking`).
+2. **Conflict-aware review routing**: surface blocking conflicts in the
    `## Open Conflicts` section of the review packet so reviewers see them
    without a separate query.
+3. **Agent card sync from Multica**: today the bridge leaves
+   `allowed_paths` / `forbidden_paths` unset unless the operator registers
+   the agent in MAC by hand. Wiring Multica's agent roster into
+   `Registry.register(...)` would turn enforcement on automatically.

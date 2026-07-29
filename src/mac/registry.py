@@ -8,7 +8,11 @@ from typing import Any
 from uuid import uuid4
 
 from mac.events import TaskEvent, TaskEventBus
-from mac.protocol.errors import QualityGateError, StateConflictError
+from mac.protocol.errors import (
+    BoundaryViolationError,
+    QualityGateError,
+    StateConflictError,
+)
 from mac.protocol.messages import (
     AuditEntry,
     BlockerRecord,
@@ -470,6 +474,7 @@ class Registry:
         quality_result: dict[str, Any] | None = None,
         handoff: HandoffResult | None = None,
         detect_conflicts: bool = False,
+        enforce_boundaries: bool = False,
     ) -> dict[str, Any]:
         """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
 
@@ -493,8 +498,28 @@ class Registry:
         :returns: A summary dict with keys ``status``, ``task_id``,
             ``quality_gate``, and optionally ``review``, ``reason``, and
             ``conflicts`` (only when detect_conflicts=True and the task
-            completed successfully).
+            completed successfully), or ``violations`` (only when
+            ``enforce_boundaries=True`` and the handoff crossed the
+            agent path boundary; status will be
+            ``"boundary_violation"`` and the task stays running).
+        :param enforce_boundaries: When True, refuse to save the handoff
+            if any of its ``changed_files`` fall outside the agent's
+            ``allowed_paths`` / ``forbidden_paths``. Returns a structured
+            ``boundary_violation`` result instead of completing the task.
+            Defaults to False to preserve the soft-block behaviour of
+            ``save_handoff_result`` for callers that don't opt in.
         """
+        # 0. Hard-refuse the handoff if boundaries are enforced.
+        if enforce_boundaries and handoff is not None:
+            try:
+                self.enforce_path_boundaries(task_id, handoff)
+            except BoundaryViolationError as exc:
+                return {
+                    "status": "boundary_violation",
+                    "task_id": task_id,
+                    "quality_gate": "passed",
+                    "violations": list(exc.violations),
+                }
         # 1. Submit quality evidence if provided.
         if quality_result is not None:
             self.submit_quality_result(task_id, quality_result)
@@ -790,6 +815,66 @@ class Registry:
                 )
                 created.append(self.record_conflict(conflict))
         return created
+
+    def enforce_path_boundaries(
+        self,
+        task_id: str,
+        handoff: HandoffResult,
+    ) -> list[str]:
+        """Hard-refuse a handoff whose changed_files cross the agent boundary.
+
+        Returns the list of allowed (passing) files when the handoff is
+        within the agent's :attr:`AgentCard.allowed_paths` /
+        :attr:`AgentCard.forbidden_paths`. Raises
+        :class:`BoundaryViolationError` carrying the list of violating
+        patterns when any file fails.
+
+        Enforcement is opt-in per agent: when both ``allowed_paths`` and
+        ``forbidden_paths`` are empty on the agent card the call is a
+        no-op and returns ``handoff.changed_files`` unchanged. This
+        matches the behaviour of :meth:`save_handoff_result` /
+        ``_apply_path_guardrails``, which also treats empty patterns as
+        a permissive default for agents without a declared boundary.
+
+        :param task_id: Owning task (used to look up the agent). Falls
+            back to ``handoff.agent_id`` if the task has no recorded
+            agent yet.
+        :param handoff: The :class:`HandoffResult` whose changed_files
+            will be checked.
+        :returns: The subset of ``handoff.changed_files`` that pass the
+            boundary check.
+        :raises BoundaryViolationError: When one or more files violate
+            the agent boundary.
+        """
+        agent = self.get_agent(handoff.agent_id)
+        allowed_patterns: list[str] = []
+        forbidden_patterns: list[str] = []
+        if agent is not None:
+            allowed_patterns = list(getattr(agent, "allowed_paths", []) or [])
+            forbidden_patterns = list(getattr(agent, "forbidden_paths", []) or [])
+        if not allowed_patterns and not forbidden_patterns:
+            return list(handoff.changed_files)
+        violations: list[str] = []
+        passing: list[str] = []
+        for changed_file in handoff.changed_files:
+            normalized = changed_file.replace("\\", "/")
+            hit_forbidden = next(
+                (p for p in forbidden_patterns if _glob_match(normalized, p)),
+                None,
+            )
+            if hit_forbidden is not None:
+                violations.append(f"forbidden:{changed_file}:{hit_forbidden}")
+                continue
+            if allowed_patterns:
+                if any(_glob_match(normalized, p) for p in allowed_patterns):
+                    passing.append(changed_file)
+                else:
+                    violations.append(f"not_allowed:{changed_file}")
+            else:
+                passing.append(changed_file)
+        if violations:
+            raise BoundaryViolationError(violations)
+        return passing
 
     def cleanup_tasks(
         self,

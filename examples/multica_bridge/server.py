@@ -285,12 +285,24 @@ def _on_agent_completed(data: dict[str, Any]) -> dict[str, Any]:
         quality_result=quality,
         handoff=handoff,
         detect_conflicts=True,
+        enforce_boundaries=True,
     )
     # Reverse channel: post the review packet back to Multica so the
     # original issue shows the structured handoff. Failures are
     # non-fatal and persisted to disk; the webhook response still
     # returns 200.
-    if result.get("status") in ("completed", "review_ready"):
+    status = result.get("status")
+    if status == "boundary_violation":
+        # The handoff crossed the agent path boundary; skip the reverse
+        # channel (no review packet to post) but keep the webhook 200 so
+        # Multica gets the structured violations back.
+        logger.warning(
+            "path boundary violation for %s: %s",
+            tid,
+            result.get("violations"),
+        )
+        return result
+    if status in ("completed", "review_ready"):
         issue_id = data["issue_id"]
         try:
             packet = _format_review_packet(

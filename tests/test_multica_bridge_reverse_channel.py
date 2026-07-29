@@ -43,6 +43,32 @@ def bridge():
 
 
 @pytest.fixture
+def isolated_client(isolated_bridge):
+    return TestClient(isolated_bridge.app)
+
+
+@pytest.fixture
+def isolated_bridge(tmp_path, monkeypatch):
+    """Bridge backed by an isolated mac.db under tmp_path.
+
+    The shared `bridge` fixture in this file uses the default mac.db
+    path, which leaves stale tasks and conflict records between runs.
+    Tests that exercise file-overlap conflict detection need a clean
+    ledger so that `detect_file_overlap_conflicts` actually creates
+    new ConflictRecords and the bridge sees them in the response.
+    """
+    db_path = tmp_path / "mac.db"
+    monkeypatch.setenv("MAC_DB_PATH", str(db_path))
+    sys.modules.pop("server", None)
+    server = importlib.import_module("server")
+    server.WEBHOOK_SECRET = ""
+    server.MULTICA_API_URL = ""
+    server.MULTICA_API_TOKEN = ""
+    server.REVIEW_FALLBACK_DIR = ""
+    yield server
+
+
+@pytest.fixture
 def client(bridge):
     return TestClient(bridge.app)
 
@@ -195,11 +221,55 @@ def test_reverse_channel_does_not_run_when_status_not_done(client, bridge, monke
     # agent.failed does NOT trigger reverse channel -- only completed/review_ready do.
     assert captured == []
 
-def test_review_packet_includes_file_overlap_conflicts(client, bridge, monkeypatch):
-    _seed_submitted_task(client, "OVR-1")
-    _seed_submitted_task(client, "OVR-2")
+def test_boundary_violation_returns_structured_200(isolated_client, isolated_bridge, monkeypatch):
+    """When an agent changes files outside its forbidden paths, the bridge
+    refuses to record the handoff, returns a structured 200 with the
+    violations, and does NOT trigger the reverse channel.
+    """
+    _seed_submitted_task(isolated_client, "BV-1")
+    # Register claude-frontend with a strict forbidden_paths so the bridge
+    # picks up the boundary on the next done() call. The bridge does not
+    # auto-register agents, so we have to do it explicitly here.
+    from mac.protocol.messages import AgentCapability, AgentCard
+    isolated_bridge.registry.register(
+        AgentCard(
+            agent_id="claude-frontend",
+            name="claude-frontend",
+            capabilities=[AgentCapability(name="frontend")]
+        ).model_copy(update={"forbidden_paths": ["secrets/*"]})
+    )
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+    monkeypatch.setattr(
+        isolated_bridge.urllib.request, "urlopen",
+        lambda *a, **kw: captured.append(1) or _FakeResponse(200),
+    )
+    payload = {
+        "issue_id": "BV-1",
+        "agent_id": "claude-frontend",
+        "changed_files": ["secrets/key.pem"],
+        "verification": "pytest:pass",
+        "risks": [],
+    }
+    r = isolated_client.post("/webhook/multica", json={"type": "agent.completed", "data": payload})
+    # Webhook stays 200 so Multica gets the structured violations.
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "boundary_violation"
+    assert body["task_id"] == "multica-BV-1"
+    assert isinstance(body.get("violations"), list)
+    assert any("forbidden:secrets/key.pem" in v for v in body["violations"])
+    # Reverse channel must NOT fire for a refused handoff.
+    assert captured == []
+    # And the handoff was not persisted.
+    assert isolated_bridge.registry.get_handoff_result("multica-BV-1") is None
+
+
+def test_review_packet_includes_file_overlap_conflicts(isolated_client, isolated_bridge, monkeypatch):
+    _seed_submitted_task(isolated_client, "OVR-1")
+    _seed_submitted_task(isolated_client, "OVR-2")
     # Complete OVR-1 first (no reverse channel) so OVR-2 has something to overlap with.
-    monkeypatch.setattr(bridge, "MULTICA_API_URL", "")
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
     payload_1 = {
         "issue_id": "OVR-1",
         "agent_id": "claude-shared",
@@ -207,18 +277,18 @@ def test_review_packet_includes_file_overlap_conflicts(client, bridge, monkeypat
         "verification": "pytest:pass",
         "risks": [],
     }
-    r = client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_1})
+    r = isolated_client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_1})
     assert r.status_code == 200
 
     # Now wire the reverse channel and complete OVR-2.
-    monkeypatch.setattr(bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
     captured = []
 
     def fake_urlopen(req, timeout=10):
         captured.append(req.data.decode("utf-8"))
         return _FakeResponse(201)
 
-    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
 
     payload_2 = {
         "issue_id": "OVR-2",
@@ -227,7 +297,7 @@ def test_review_packet_includes_file_overlap_conflicts(client, bridge, monkeypat
         "verification": "pytest:pass",
         "risks": [],
     }
-    r = client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_2})
+    r = isolated_client.post("/webhook/multica", json={"type": "agent.completed", "data": payload_2})
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "completed"
