@@ -16,7 +16,6 @@ no real network call is made.
 from __future__ import annotations
 
 import importlib
-import io
 import json
 import sys
 from pathlib import Path

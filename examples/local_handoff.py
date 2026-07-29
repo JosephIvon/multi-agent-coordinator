@@ -1,16 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sys
+from pathlib import Path
 from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from mac.protocol.messages import AgentCapability, AgentCard, ContextBundle, TaskPayload, TaskTransfer
-from mac.registry import Registry
-from mac.storage import SQLiteTaskLedger
-from mac.testing.contracts import TestContract
+from mac.protocol.messages import (  # noqa: E402  (after sys.path.insert)
+    AgentCapability,
+    AgentCard,
+    ContextBundle,
+    TaskPayload,
+    TaskTransfer,
+)
+from mac.registry import Registry  # noqa: E402  (after sys.path.insert)
+from mac.storage import SQLiteTaskLedger  # noqa: E402  (after sys.path.insert)
+from mac.testing.contracts import TestContract  # noqa: E402  (after sys.path.insert)
 
 
 def main() -> None:

@@ -124,8 +124,8 @@ def _format_review_packet(
     """
     lines = [f"# Review Task: {task_id}", ""]
     lines.append("## Task")
-    lines.append(f"- Status: completed")
-    lines.append(f"- Capability: multica_issue")
+    lines.append("- Status: completed")
+    lines.append("- Capability: multica_issue")
     lines.append(f"- Multica issue: {issue_id}")
     lines.append("")
     lines.append("## HandoffResult")
@@ -366,7 +366,7 @@ def _on_agent_started(data: dict[str, Any]) -> dict[str, Any]:
                 )
             )
             card_synced = True
-        except Exception as exc:  # noqa: BLE001 -- sync is best-effort
+        except Exception as exc:  # -- sync is best-effort
             logger.warning("agent card sync failed for %s: %s", agent_id, exc)
     # Idempotent under Multica at-least-once delivery:
     # duplicate calls hit StateConflictError, which we suppress.
@@ -584,11 +584,11 @@ def heartbeat_agent(agent_id: str, payload: dict[str, Any] | None = None) -> dic
             status=body.get("status", "online"),
             load=body.get("load"),
         )
-    except KeyError:
+    except KeyError as err:
         raise HTTPException(
             status_code=404,
             detail={"error": "unknown_agent", "agent_id": agent_id},
-        )
+        ) from err
     return {
         "agent_id": refreshed.agent_id,
         "status": refreshed.status,

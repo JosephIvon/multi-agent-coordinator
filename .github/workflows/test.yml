@@ -31,11 +31,20 @@ jobs:
         run: python -c "import mac; print(mac.__version__)"
 
   test:
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        # Cross-version coverage on Linux (cheap, fast)
+        include:
+          - { python-version: "3.10", os: ubuntu-latest }
+          - { python-version: "3.11", os: ubuntu-latest }
+          - { python-version: "3.12", os: ubuntu-latest }
+          - { python-version: "3.13", os: ubuntu-latest }
+          # Cross-platform coverage on the latest supported Python
+          - { python-version: "3.12", os: macos-latest }
+          - { python-version: "3.12", os: windows-latest }
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +64,54 @@ jobs:
         run: python -m pytest tests/ --cov=mac --cov-report=term-missing --cov-report=xml -q --tb=short
 
       - name: Upload coverage artifact
-        if: matrix.python-version == '3.12'
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage.xml
+
+  build:
+    # Always build a wheel + sdist on push to main so packaging
+    # regressions surface immediately rather than at tag time.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: pip install build twine
+
+      - name: Build distributions
+        run: python -m build
+
+      - name: Check distributions
+        run: twine check dist/*
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  bridge-smoke:
+    # Exercises the Multica bridge end-to-end via --demo so a broken
+    # handler signature (e.g. forgot to add a kwarg) surfaces even when
+    # the bridge-specific tests are skipped on this Python/OS.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with http extra
+        run: pip install -e ".[dev,http]"
+
+      - name: Run bridge --demo
+        run: python examples/multica_bridge/server.py --demo

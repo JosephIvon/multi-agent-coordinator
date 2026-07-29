@@ -30,7 +30,6 @@ from mac.metrics import compute_metrics, format_table  # noqa: E402
 from mac.protocol.messages import (  # noqa: E402
     AgentCapability,
     AgentCard,
-    ConflictRecord,
     CoordinationPolicy,
     HandoffResult,
     TaskPayload,
