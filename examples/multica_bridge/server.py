@@ -181,6 +181,41 @@ def _format_review_packet(
     return chr(10).join(lines) + chr(10)
 
 
+def _post_json_to_multica(path: str, body: str, timeout: int = 10) -> tuple[bool, int | None, BaseException | None]:
+    """POST a JSON envelope to Multica and report the outcome.
+
+    Centralises the URL build, Bearer-token injection, and timeout that
+    both the review-packet reverse channel and the audit-trail
+    ship-back need. When MULTICA_API_URL is empty the call is a no-op
+    that returns ``(True, None, None)`` so dev environments do not
+    regress.
+
+    Returns ``(ok, status_code, exception)`` where ``ok`` is True iff
+    Multica returned 2xx. ``status_code`` is the HTTP status on a
+    successful response, ``None`` on network failure. ``exception``
+    carries the underlying URLError/HTTPError/TimeoutError/OSError on
+    failure, ``None`` otherwise.
+    """
+    if not MULTICA_API_URL:
+        return True, None, None
+    url = f"{MULTICA_API_URL}{path}"
+    payload = json.dumps({"body": body}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return (200 <= resp.status < 300), resp.status, None
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        return False, None, exc
+
+
 def _post_review_to_multica(issue_id: str, body: str) -> bool:
     """POST the review packet markdown back to Multica as an issue comment.
 
@@ -193,31 +228,18 @@ def _post_review_to_multica(issue_id: str, body: str) -> bool:
     if not MULTICA_API_URL:
         logger.info("reverse channel skipped: MULTICA_API_URL not set")
         return True
-
-    url = f"{MULTICA_API_URL}/api/issues/{issue_id}/comments"
-    payload = json.dumps({"body": body}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
-        },
+    ok, status, exc = _post_json_to_multica(
+        f"/api/issues/{issue_id}/comments", body, timeout=10,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            ok = 200 <= resp.status < 300
-            if ok:
-                logger.info("reverse channel: posted review packet for %s (status=%d)", issue_id, resp.status)
-            else:
-                logger.warning("reverse channel: non-2xx %d for %s", resp.status, issue_id)
-                _write_review_fallback(issue_id, body)
-            return ok
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+    if ok:
+        logger.info("reverse channel: posted review packet for %s (status=%d)", issue_id, status)
+        return True
+    if exc is not None:
         logger.warning("reverse channel: failed to post %s (%s); writing fallback", issue_id, exc)
-        _write_review_fallback(issue_id, body)
-        return False
+    else:
+        logger.warning("reverse channel: non-2xx %d for %s", status, issue_id)
+    _write_review_fallback(issue_id, body)
+    return False
 
 
 def _write_review_fallback(issue_id: str, body: str) -> None:
@@ -284,25 +306,15 @@ def _audit_to_multica(issue_id: str, event_type: str, summary: str) -> None:
         return
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     body = f"### [MAC audit] `{event_type}` @ {ts}\n\n{summary}\n"
-    url = f"{MULTICA_API_URL}/api/issues/{issue_id}/comments"
-    payload = json.dumps({"body": body}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
-        },
+    ok, status, exc = _post_json_to_multica(
+        f"/api/issues/{issue_id}/comments", body, timeout=5,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            if 200 <= resp.status < 300:
-                logger.info("audit trail: posted %s for %s (status=%d)", event_type, issue_id, resp.status)
-            else:
-                logger.warning("audit trail: non-2xx %d for %s/%s", resp.status, issue_id, event_type)
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+    if ok:
+        logger.info("audit trail: posted %s for %s (status=%d)", event_type, issue_id, status)
+    elif exc is not None:
         logger.warning("audit trail: failed to post %s/%s (%s)", issue_id, event_type, exc)
+    else:
+        logger.warning("audit trail: non-2xx %d for %s/%s", status, issue_id, event_type)
 
 
 # ----- event handlers ---------------------------------------------------------
