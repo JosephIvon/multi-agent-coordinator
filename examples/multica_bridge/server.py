@@ -33,12 +33,22 @@ Reverse channel (MAC -> Multica):
     mode). On any 4xx/5xx or network failure the packet is written to
     REVIEW_FALLBACK_DIR and a warning is logged; the webhook response
     still returns 200 so Multica does not retry.
+
+Audit-trail shipping (also MAC -> Multica, but distinct from the review
+packet):
+    Set MULTICA_AUDIT_TRAIL=true to enable. After every handled webhook
+    the bridge POSTs a short one-line audit comment ("[MAC audit]
+    `<event_type>` @ <ts>") back to the same Multica issue. Failures
+    are logged at WARNING but do NOT write a fallback file -- audit
+    loss is non-critical because the MAC ledger already holds the
+    authoritative record.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import hashlib
 import hmac
 import json
@@ -54,6 +64,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from mac.protocol.errors import StateConflictError
 from mac.protocol.messages import (
+    AgentCard,
     HandoffResult,
     TaskPayload,
     TaskTransfer,
@@ -75,6 +86,7 @@ GUARDED_PATTERNS = [
     if p.strip()
 ]
 REFUSE_ON_BLOCKING = os.environ.get("MULTICA_REFUSE_ON_BLOCKING", "true").lower() not in ("0", "false", "no", "")
+AUDIT_TRAIL = os.environ.get("MULTICA_AUDIT_TRAIL", "false").lower() not in ("0", "false", "no", "")
 
 logger = logging.getLogger("multica_bridge")
 
@@ -226,6 +238,73 @@ def _write_review_fallback(issue_id: str, body: str) -> None:
         logger.error("reverse channel: could not write fallback for %s: %s", issue_id, exc)
 
 
+def _summarize_handler_result(result: dict[str, Any] | None) -> str:
+    """Reduce a handler result dict to a one-or-two-line audit summary."""
+    if not isinstance(result, dict):
+        return "(no result)"
+    bits = []
+    status = result.get("status")
+    if status:
+        bits.append(f"status={status}")
+    task_id = result.get("task_id")
+    if task_id:
+        bits.append(f"task_id={task_id}")
+    conflicts = result.get("conflicts")
+    if isinstance(conflicts, list) and conflicts:
+        bits.append(f"conflicts={len(conflicts)}")
+    violations = result.get("violations")
+    if isinstance(violations, list) and violations:
+        bits.append(f"violations={len(violations)}")
+    error = result.get("error")
+    if error:
+        bits.append(f"error={error}")
+    return ", ".join(bits) if bits else "ok"
+
+
+def _audit_to_multica(issue_id: str, event_type: str, summary: str) -> None:
+    """Best-effort audit-trail ship-back to Multica as an issue comment.
+
+    Opt-in via MULTICA_AUDIT_TRAIL=true (default false) to avoid spamming
+    Multica with every webhook event. Failures are logged but never
+    raised -- the MAC ledger already holds the authoritative record, so
+    losing an audit comment is acceptable. No fallback file is written
+    on failure (unlike the review-packet reverse channel) because
+    audit-trail loss is non-critical and we want to keep the working
+    directory clean during long-running bridges.
+    """
+    if not AUDIT_TRAIL:
+        return
+    if not MULTICA_API_URL:
+        logger.debug("audit trail: MULTICA_API_URL not set, skipping %s", event_type)
+        return
+    if not issue_id:
+        # Some events (e.g. roster broadcasts) may not carry an issue_id;
+        # without one we cannot attach a comment to a Multica issue.
+        logger.debug("audit trail: no issue_id on %s, skipping", event_type)
+        return
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    body = f"### [MAC audit] `{event_type}` @ {ts}\n\n{summary}\n"
+    url = f"{MULTICA_API_URL}/api/issues/{issue_id}/comments"
+    payload = json.dumps({"body": body}).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            if 200 <= resp.status < 300:
+                logger.info("audit trail: posted %s for %s (status=%d)", event_type, issue_id, resp.status)
+            else:
+                logger.warning("audit trail: non-2xx %d for %s/%s", resp.status, issue_id, event_type)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+        logger.warning("audit trail: failed to post %s/%s (%s)", issue_id, event_type, exc)
+
+
 # ----- event handlers ---------------------------------------------------------
 
 
@@ -255,12 +334,39 @@ def _on_agent_started(data: dict[str, Any]) -> dict[str, Any]:
     # which we swallow.
     tid = _task_id(data["issue_id"])
     agent_id = data["agent_id"]
+    # Sync the agent card from Multica roster metadata (if provided) so
+    # MAC path-boundary enforcement turns on automatically without the
+    # operator having to register the agent by hand. Older Multica
+    # deployments that do not yet send `agent_card` simply skip this
+    # step and keep behaving like today (no enforcement).
+    card_payload = data.get("agent_card")
+    card_synced = False
+    if isinstance(card_payload, dict) and card_payload:
+        try:
+            registry.register(
+                AgentCard(
+                    agent_id=agent_id,
+                    name=card_payload.get("name", agent_id),
+                    version=str(card_payload.get("version", "1.0")),
+                    allowed_paths=list(card_payload.get("allowed_paths", []) or []),
+                    forbidden_paths=list(card_payload.get("forbidden_paths", []) or []),
+                    metadata=dict(card_payload.get("metadata", {}) or {}),
+                )
+            )
+            card_synced = True
+        except Exception as exc:  # noqa: BLE001 -- sync is best-effort
+            logger.warning("agent card sync failed for %s: %s", agent_id, exc)
     # Idempotent under Multica at-least-once delivery:
     # duplicate calls hit StateConflictError, which we suppress.
     for action in ("accept_handoff", "start_task"):
         with contextlib.suppress(StateConflictError):
             getattr(registry, action)(tid, agent_id)
-    return {"status": "running", "task_id": tid, "agent_id": agent_id}
+    return {
+        "status": "running",
+        "task_id": tid,
+        "agent_id": agent_id,
+        "card_synced": card_synced,
+    }
 
 
 def _on_agent_commented(data: dict[str, Any]) -> dict[str, Any]:
@@ -375,7 +481,16 @@ async def multica_webhook(request: Request) -> dict[str, Any]:
     handler = HANDLERS.get(event.get("type"))
     if handler is None:
         return {"ignored": event.get("type")}
-    return handler(event.get("data", {}))
+    data = event.get("data", {}) or {}
+    result = handler(data)
+    # Fire-and-forget audit so reviewers see the full lifecycle on the
+    # original Multica issue without having to round-trip via mac-agent.
+    _audit_to_multica(
+        data.get("issue_id", ""),
+        event.get("type", ""),
+        _summarize_handler_result(result),
+    )
+    return result
 
 
 @app.get("/healthz")

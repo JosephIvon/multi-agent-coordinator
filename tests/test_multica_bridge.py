@@ -120,7 +120,12 @@ def test_agent_started_is_idempotent_under_duplicate(client):
         "issue_id": "T-3", "agent_id": "agent-x",
     })
     assert second.status_code == 200
-    assert second.json() == {"status": "running", "task_id": "multica-T-3", "agent_id": "agent-x"}
+    assert second.json() == {
+        "status": "running",
+        "task_id": "multica-T-3",
+        "agent_id": "agent-x",
+        "card_synced": False,
+    }
 
 
 def test_agent_commented_records_checkpoint(client):

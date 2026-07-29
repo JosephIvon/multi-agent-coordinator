@@ -191,14 +191,34 @@ examples/multica_bridge/
   reverse channel is skipped because there is no completed-state review
   packet to post. Setting `MULTICA_REFUSE_ON_BLOCKING=false` (or leaving
   `MULTICA_GUARDED_PATHS` empty) keeps the old informational behaviour.
+- **Agent-card auto-sync from Multica roster**: when `agent.started` carries
+  an `agent_card` payload (allowed_paths / forbidden_paths / metadata), the
+  bridge registers it via `Registry.register(AgentCard(...))` before
+  transitioning to running. Path-boundary enforcement turns on
+  automatically; older Multica deployments that do not yet send `agent_card`
+  continue to work unchanged (the handler response surfaces `card_synced`
+  so callers can verify wiring).
+- **Audit-trail shipping (MAC -> Multica)**: with `MULTICA_AUDIT_TRAIL=true`
+  and `MULTICA_API_URL` set, every handled webhook fires a short
+  fire-and-forget POST to `POST /api/issues/<issue_id>/comments` with body
+  `### [MAC audit] `<event_type>` @ <ts>\n<summary>`. Failures are logged
+  at WARNING but never break the webhook (response stays 200). No fallback
+  file is written on failure -- the MAC ledger is the authoritative
+  record. Default OFF to avoid spamming Multica; flip it on when you want
+  reviewers to see the full lifecycle on the original issue without
+  needing to round-trip via mac-agent.
 
 ## Next steps if you keep building
 
-1. **Agent card sync from Multica**: today the bridge leaves
-   `allowed_paths` / `forbidden_paths` unset unless the operator registers
-   the agent in MAC by hand. Wiring Multica's agent roster into
-   `Registry.register(...)` would turn enforcement on automatically.
-2. **Audit-trail shipping**: every webhook handler currently logs at DEBUG;
-   sending the audit trail (and conflict events) into Multica as issue
-   comments would let reviewers see the full lifecycle without a separate
-   mac-agent CLI round-trip.
+1. **Agent capability heartbeat**: today the bridge syncs an agent card on
+   `agent.started` but does not refresh `last_heartbeat`, `load`, or
+   `status`. Adding a heartbeat thread that pings Multica every N seconds
+   (or consumes a periodic event) would let MAC schedule against live
+   capacity rather than static declarations.
+2. **Cross-bridge review aggregation**: when many issues are in flight,
+   the review packet is per-issue. A roll-up endpoint that fetches all
+   completed tasks in a window and ships a single digest comment would
+   help reviewers who watch many issues at once.
+3. **WebSocket bridge option**: today the bridge is HTTP-only. Multica
+   supports webhooks plus a long-poll channel; the latter would let the
+   bridge push progress checkpoints without waiting for a Multica round-trip.

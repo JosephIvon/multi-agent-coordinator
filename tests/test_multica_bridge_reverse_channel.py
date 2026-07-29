@@ -436,3 +436,131 @@ def test_review_packet_includes_file_overlap_conflicts(isolated_client, isolated
     assert "src/shared.py" in packet
     assert "multica-OVR-1" in packet
     assert "multica-OVR-2" in packet
+
+
+
+# ---------------------------------------------------------------------------
+# Round 5: audit-trail shipping and agent-card sync
+# ---------------------------------------------------------------------------
+
+
+def test_audit_trail_skipped_by_default(isolated_client, isolated_bridge, monkeypatch):
+    """MULTICA_AUDIT_TRAIL defaults to false; no audit POST should happen
+    even when MULTICA_API_URL is set."""
+    monkeypatch.setattr(isolated_bridge, "AUDIT_TRAIL", False)
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+    monkeypatch.setattr(
+        isolated_bridge.urllib.request,
+        "urlopen",
+        lambda *a, **kw: (captured.append(a[0].full_url) or _FakeResponse(201)),
+    )
+    _seed_submitted_task(isolated_client, "AUDIT-1")
+    assert captured == [], f"unexpected audit POST(s): {captured}"
+
+
+def test_audit_trail_posts_when_enabled(isolated_client, isolated_bridge, monkeypatch):
+    """With MULTICA_AUDIT_TRAIL=true and a real API URL, every handled
+    event should fire a POST to /api/issues/<id>/comments with the
+    audit-trail body prefix."""
+    monkeypatch.setattr(isolated_bridge, "AUDIT_TRAIL", True)
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    captured = []
+    monkeypatch.setattr(
+        isolated_bridge.urllib.request,
+        "urlopen",
+        lambda *a, **kw: (
+            captured.append((a[0].full_url, json.loads(a[0].data.decode("utf-8"))))
+            or _FakeResponse(201)
+        ),
+    )
+    # issue.created should fire 1 audit POST (no Multica response here,
+    # we just assert that the dispatch reached the audit hook).
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={"type": "issue.created", "data": {"issue_id": "AUDIT-2", "title": "demo"}},
+    )
+    assert r.status_code == 200
+    assert len(captured) == 1
+    url, body = captured[0]
+    assert url.endswith("/api/issues/AUDIT-2/comments")
+    assert "[MAC audit]" in body["body"]
+    assert "`issue.created`" in body["body"]
+    # handler-result summary should mention the task_id we just submitted
+    assert "multica-AUDIT-2" in body["body"]
+
+
+def test_audit_trail_swallows_network_errors(isolated_client, isolated_bridge, monkeypatch):
+    """A network failure during the audit POST must not break the webhook
+    (response stays 200, audit failure is silent)."""
+    monkeypatch.setattr(isolated_bridge, "AUDIT_TRAIL", True)
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    def boom(*a, **kw):
+        raise urllib_error.URLError("connection refused")
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", boom)
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={"type": "issue.created", "data": {"issue_id": "AUDIT-3"}},
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "submitted"
+
+
+def test_agent_card_synced_from_multica_payload(isolated_client, isolated_bridge, monkeypatch):
+    """When agent.started carries an agent_card payload, the bridge must
+    register it via Registry.register so MAC path-boundary enforcement
+    turns on automatically. The handler response also surfaces
+    card_synced=True."""
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
+    # Seed an issue so agent.started has a target task.
+    _seed_submitted_task(isolated_client, "CARD-1")
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.started",
+            "data": {
+                "issue_id": "CARD-1",
+                "agent_id": "claude-frontend",
+                "agent_card": {
+                    "name": "Claude Frontend",
+                    "version": "2.3",
+                    "allowed_paths": ["src/frontend/**"],
+                    "forbidden_paths": ["secrets/**", "db/migrations/**"],
+                    "metadata": {"owner": "team-frontend"},
+                },
+            },
+        },
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["card_synced"] is True
+    # The agent card must be readable from the ledger so a later
+    # boundary-enforced done() can consult it.
+    card = isolated_bridge.registry.get_agent("claude-frontend")
+    assert card is not None
+    assert card.agent_id == "claude-frontend"
+    assert card.allowed_paths == ["src/frontend/**"]
+    assert card.forbidden_paths == ["secrets/**", "db/migrations/**"]
+
+
+def test_agent_card_absent_keeps_old_behavior(isolated_client, isolated_bridge, monkeypatch):
+    """If agent.started has no agent_card payload (older Multica), the
+    handler must still succeed and card_synced must be False. Nothing
+    is registered against the ledger."""
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
+    _seed_submitted_task(isolated_client, "NOCARD-1")
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.started",
+            "data": {"issue_id": "NOCARD-1", "agent_id": "claude-frontend"},
+        },
+    )
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["card_synced"] is False
+    # No agent card in the ledger (the registry returns None for agents
+    # it has never seen).
+    assert isolated_bridge.registry.get_agent("claude-frontend") is None
