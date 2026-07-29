@@ -1,0 +1,1 @@
+{"type": "agent.completed", "data": {"issue_id": "TEST-1", "agent_id": "claude-curl", "changed_files": ["src/curl_demo.py"], "verification": "pytest:pass", "risks": []}}
