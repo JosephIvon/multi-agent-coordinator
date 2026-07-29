@@ -86,6 +86,25 @@ On Linux/macOS `curl` works fine; this caveat is Windows-only.
 The `/healthz` endpoint returns 200 OK with `{"status":"ok"}` -- safe to use
 either tool against:
 
+### Reverse channel (MAC -> Multica)
+
+When `MULTICA_API_URL` is set, the bridge POSTs a markdown review packet
+back to Multica as an issue comment after every successful `done()`
+(only when the result is `completed` or `review_ready`, not `failed`).
+The packet mirrors what `mac-agent review-packet` would print.
+
+```
+MULTICA_API_URL=http://10.47.102.70:8081
+MULTICA_API_TOKEN=optional-bearer-token
+REVIEW_FALLBACK_DIR=.agent-context/review-fallback   # where to write
+                                                        # on POST failure
+```
+
+When `MULTICA_API_URL` is empty the reverse channel is a no-op (dev mode).
+On any 4xx/5xx or network failure the packet is written to
+`REVIEW_FALLBACK_DIR` and a warning is logged; the webhook response
+still returns 200 so Multica does not retry the whole webhook.
+
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/healthz
 ```
@@ -119,8 +138,6 @@ examples/multica_bridge/
 
 - No retry queue / dead-letter handling. Multica at-least-once delivery is
   expected to cover retries; idempotent handlers absorb duplicates.
-- No reverse channel (MAC review_packet -> Multica comment). Add as Phase 2
-  with a separate endpoint and `MULTICA_API_TOKEN` for the outbound call.
 - No batch events. Multica emits one POST per event today; if it switches to
   batches, wrap the handler loop in `for ev in batch:`.
 - No agent roster registration. Multica is the source of truth for agent
@@ -138,8 +155,6 @@ examples/multica_bridge/
 
 ## Next steps if you keep building
 
-1. **Reverse channel** (MAC -> Multica): when `mark_review_ready` is called,
-   POST the review_packet markdown back as a Multica comment.
 2. **Conflict surfacing**: scan the ledger for two completed tasks whose
    `changed_files` overlap; raise `ConflictRecord` on each.
 3. **Path boundary enforcement**: refuse to record a `done` whose
