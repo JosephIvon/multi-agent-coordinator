@@ -26,6 +26,9 @@ env/
 # Claude Code local settings (per-user, not shared with the repo)
 .claude/settings.local.json
 
+# Codex Desktop local state (per-user, not shared with the repo)
+.codex/
+
 # Testing
 .pytest_cache/
 .coverage
