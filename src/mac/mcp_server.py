@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -7,6 +8,7 @@ from typing import Any, Literal, cast
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 
+from mac import scoring
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import TaskTransfer
 from mac.quality.gate import evaluate_quality_gate
@@ -67,7 +69,27 @@ def _safe_call(func: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tools (15)
+# Long-lived registry for scoring hooks (Round 16)
+# ---------------------------------------------------------------------------
+#
+# Unlike _registry() which is rebuilt per call, the scorer tools need a
+# process-wide Registry so set_scoring_fn() sticks across MCP requests.
+# Other tools continue to use the stateless _registry() so they remain
+# side-effect free.
+
+_LONG_REGISTRY: Registry | None = None
+
+
+def _long_registry() -> Registry:
+    # Memoised Registry used by mac_set_scorer / mac_list_scorers / etc.
+    global _LONG_REGISTRY
+    if _LONG_REGISTRY is None:
+        _LONG_REGISTRY = Registry(SQLiteTaskLedger(_DB_PATH))
+    return _LONG_REGISTRY
+
+
+# ---------------------------------------------------------------------------
+# Tools (15 + 3 scoring = 18)
 # ---------------------------------------------------------------------------
 
 
@@ -501,6 +523,108 @@ def health_resource() -> str:
         "open_tasks": len(open_tasks),
         "inflight_agents": len(inflight),
     })
+
+
+@mcp.tool()
+def mac_list_scorers() -> str:
+    """List registered scorers from mac.scoring (sync + async).
+
+    Returns the union of named scorers visible to MAC today, including
+    the built-in ``priority`` scorer. Names registered in the async
+    registry get ``kind="async"``; the rest are ``"sync"``. Use the
+    returned names as input to ``mac_set_scorer`` or ``mac_test_scorer``.
+    """
+    sync_names = sorted(scoring.list_scorers().keys())
+    async_names = sorted(scoring.list_async_scorers().keys())
+    payload = {
+        "sync": [
+            {"name": name, "qualname": getattr(scoring.get_scorer(name), "__qualname__", repr(scoring.get_scorer(name)))}
+            for name in sync_names
+        ],
+        "async": [
+            {"name": name, "qualname": getattr(scoring.get_async_scorer(name), "__qualname__", repr(scoring.get_async_scorer(name)))}
+            for name in async_names
+        ],
+    }
+    return json.dumps(payload)
+
+
+@mcp.tool()
+def mac_set_scorer(name: str | None) -> str:
+    """Install a named scoring hook on the long-lived MAC Registry.
+
+    :param name: Name registered in ``mac.scoring``. Pass ``null``/empty
+        to clear the hook (reverts to SQL natural ordering). Unknown
+        names raise ``ToolError`` so config errors surface immediately.
+    """
+    def _do() -> Any:
+        registry = _long_registry()
+        if not name:
+            registry.set_scoring_fn(None)
+        else:
+            registry.set_scoring_fn(name)
+        # Reflect the hook back so the caller can verify what is now live.
+        info = {
+            "name": name,
+            "active_scorer_id": registry._scoring_fn_id,
+            "async_installed": registry._async_scoring_fn is not None,
+            "sync_installed": registry._scoring_fn is not None,
+        }
+        return json.dumps(info)
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_test_scorer(
+    name: str,
+    limit: int = 5,
+    project_context: str | None = None,
+) -> str:
+    """Dry-run a named scorer against the first ``limit`` proposed tasks.
+
+    Sync scorers are invoked inline; async scorers are awaited via
+    ``asyncio.run`` (the server is single-threaded under stdio so this
+    is safe and simpler than the in-process loop case). Returns the
+    computed ``task_id -> score`` map plus the proposed tasks that were
+    inspected. Use this to validate a new scorer before swapping it in
+    via ``mac_set_scorer``.
+    """
+    def _do() -> Any:
+        # The test path uses a fresh per-call Registry so we do not
+        # pollute the long-lived one with a stale cache or scoring hook.
+        from mac.registry import Registry as _Registry
+        from mac.storage.sqlite import SQLiteTaskLedger as _Ledger
+        test_registry = _Registry(_Ledger(_DB_PATH), scoring_fn=name)
+        tasks = test_registry.ledger.list_task_transfers(
+            status="proposed", project_context=project_context
+        )
+        tasks = tasks[: max(0, int(limit))]
+        scores: dict[str, float] = {}
+        if test_registry._async_scoring_fn is not None:
+            async def _gather():
+                coros = [test_registry._async_scoring_fn(t) for t in tasks]
+                raw = await asyncio.gather(*coros, return_exceptions=True)
+                return [test_registry._to_async_score(r) for r in raw]
+            scores_list = asyncio.run(_gather())
+        elif test_registry._scoring_fn is not None:
+            scores_list = [
+                test_registry._to_async_score(test_registry._scoring_fn(t))
+                for t in tasks
+            ]
+        else:
+            # Scorer missing; map everything to 0.0 so the UI is still informative.
+            scores_list = [0.0 for _ in tasks]
+        for task, score in zip(tasks, scores_list, strict=True):
+            scores[task.task_id] = score
+        payload = {
+            "scorer": name,
+            "scored": [
+                {"task_id": t.task_id, "score": scores.get(t.task_id, 0.0), "priority": t.priority}
+                for t in tasks
+            ],
+        }
+        return json.dumps(payload)
+    return _safe_call(_do)
 
 
 # ---------------------------------------------------------------------------

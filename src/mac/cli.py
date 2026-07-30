@@ -299,6 +299,20 @@ def _build_parser() -> argparse.ArgumentParser:
     score.add_argument("--agent-id", required=True)
     score.add_argument("--capability", required=True)
 
+    scoring = subcommands.add_parser(
+        "scoring",
+        help="Inspect or dry-run scoring hooks for list_ready_tasks",
+    )
+    scoring_sub = scoring.add_subparsers(dest="scoring_command", required=True)
+    scoring_sub.add_parser("list", help="List registered sync + async scorers")
+    scoring_test = scoring_sub.add_parser(
+        "test", help="Dry-run a named scorer against proposed tasks"
+    )
+    scoring_test.add_argument("--name", required=True, help="Scorer name registered in mac.scoring")
+    scoring_test.add_argument("--db", default="mac.db")
+    scoring_test.add_argument("--limit", type=int, default=5)
+    scoring_test.add_argument("--project-context")
+
     claim = subcommands.add_parser("claim", help="Claim the next proposed task by capability")
     claim.add_argument("--db", default="mac.db")
     claim.add_argument("--agent-id", required=True)
@@ -327,6 +341,78 @@ def _parse_verification(value: str):
 
     command, result, description = (value.split(":", 2) + ["", ""])[:3]
     return VerificationEntry(command=command, result=cast(Literal["pass", "fail"], result), description=description)
+
+
+def _cmd_scoring_list() -> int:
+    from mac import scoring
+
+    payload = {
+        "sync": [
+            {
+                "name": name,
+                "qualname": getattr(
+                    scoring.get_scorer(name), "__qualname__", repr(scoring.get_scorer(name))
+                ),
+            }
+            for name in sorted(scoring.list_scorers().keys())
+        ],
+        "async": [
+            {
+                "name": name,
+                "qualname": getattr(
+                    scoring.get_async_scorer(name),
+                    "__qualname__",
+                    repr(scoring.get_async_scorer(name)),
+                ),
+            }
+            for name in sorted(scoring.list_async_scorers().keys())
+        ],
+    }
+    _print_json(payload)
+    return 0
+
+
+def _cmd_scoring_test(args) -> int:
+    import asyncio
+
+    from mac.registry import Registry
+    from mac.storage.sqlite import SQLiteTaskLedger
+
+    # Always build a fresh Registry so the CLI is read-only and never
+    # touches whatever scorer the MCP server has installed. If the
+    # requested name is unknown we degrade to a no-hook registry so the
+    # operator still gets a snapshot of the proposed tasks.
+    try:
+        registry = Registry(SQLiteTaskLedger(Path(args.db)), scoring_fn=args.name)
+    except ValueError:
+        registry = Registry(SQLiteTaskLedger(Path(args.db)))
+    tasks = registry.ledger.list_task_transfers(
+        status="proposed", project_context=args.project_context
+    )
+    tasks = tasks[: max(0, int(args.limit))]
+    if registry._async_scoring_fn is not None:
+        async def _gather():
+            coros = [registry._async_scoring_fn(t) for t in tasks]
+            raw = await asyncio.gather(*coros, return_exceptions=True)
+            return [registry._to_async_score(r) for r in raw]
+        scores_list = asyncio.run(_gather())
+    elif registry._scoring_fn is not None:
+        scores_list = [
+            registry._to_async_score(registry._scoring_fn(t)) for t in tasks
+        ]
+    else:
+        # Unknown scorer or no hook installed; surface zeros rather than
+        # crashing so the operator still sees the proposed tasks.
+        scores_list = [0.0 for _ in tasks]
+    payload = {
+        "scorer": args.name,
+        "scored": [
+            {"task_id": t.task_id, "score": s, "priority": t.priority}
+            for t, s in zip(tasks, scores_list, strict=True)
+        ],
+    }
+    _print_json(payload)
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1004,6 +1090,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         score = Registry(SQLiteStorage(Path(args.db))).get_capability_score(args.agent_id, args.capability)
         _print_json(score)
         return 0
+
+    if args.command == "scoring":
+        if args.scoring_command == "list":
+            return _cmd_scoring_list()
+        if args.scoring_command == "test":
+            return _cmd_scoring_test(args)
+        raise AssertionError(f"Unhandled scoring subcommand: {args.scoring_command}")
 
     if args.command == "claim":
         from mac.registry import Registry
