@@ -27,8 +27,32 @@ from mac.protocol.messages import (
     TaskTransfer,
 )
 from mac.quality.gate import evaluate_quality_gate
+from mac.scoring import ScoringFn, get_scorer
 from mac.storage import SQLiteTaskLedger, StatusConflict
 from mac.testing.contracts import TestContract
+
+
+def _safe_score(scorer, task) -> float:
+    """Run a scorer while protecting ``sorted()`` from NaN / None.
+
+    Scorers must return floats, but user-written code (or LLM-driven
+    policies) may occasionally return ``None`` or a non-numeric sentinel.
+    Returning a finite ``float`` here keeps :func:`sorted` total and
+    prevents :class:`ValueError` from propagating out of the registry.
+    """
+    try:
+        value = scorer(task)
+    except Exception:
+        return 0.0
+    if value is None:
+        return 0.0
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if result != result:  # NaN
+        return 0.0
+    return result
 
 
 def _sorted_pair_id(a: str, b: str) -> str:
@@ -48,12 +72,54 @@ class Registry:
         *,
         event_bus: TaskEventBus | None = None,
         policy: CoordinationPolicy | None = None,
+        scoring_fn: ScoringFn | str | None = None,
     ) -> None:
         self.ledger = ledger
         self.event_bus = event_bus
         # Default to environment-driven policy so existing call sites
         # pick up MAC_REQUIRE_REVIEW / MAC_PATH_RULES without code changes.
         self.policy: CoordinationPolicy = policy or CoordinationPolicy.from_env()
+        # Optional hook that overrides list_ready_tasks default ordering.
+        # Accepts a callable ``fn(task) -> float`` (higher = claim first)
+        # or a string name registered in ``mac.scoring``. ``None`` keeps the
+        # original SQL-natural ordering. See ``mac.scoring`` for details.
+        self._scoring_fn: ScoringFn | None = self._resolve_scoring_fn(scoring_fn)
+
+    @staticmethod
+    def _resolve_scoring_fn(
+        scoring_fn: ScoringFn | str | None,
+    ) -> ScoringFn | None:
+        """Coerce ``scoring_fn`` into a callable or ``None``.
+
+        ``None`` keeps the default behaviour. A callable is used directly.
+        A string looks up the named scorer in :mod:`mac.scoring`; unknown
+        names raise :class:`ValueError` so configuration errors surface
+        immediately instead of silently falling back to the default.
+        """
+        if scoring_fn is None:
+            return None
+        if isinstance(scoring_fn, str):
+            resolved = get_scorer(scoring_fn)
+            if resolved is None:
+                raise ValueError(
+                    f"unknown scoring_fn name {scoring_fn!r}; "
+                    f"register it via mac.scoring.register_scorer first"
+                )
+            return resolved
+        if callable(scoring_fn):
+            return scoring_fn
+        raise ValueError(
+            f"scoring_fn must be callable, str, or None; got {type(scoring_fn).__name__}"
+        )
+
+    def set_scoring_fn(self, scoring_fn: ScoringFn | str | None) -> None:
+        """Install or clear the scoring hook at runtime.
+
+        Pass ``None`` (or omit the scorer's name) to revert to the SQL
+        natural ordering used before Round 14. Re-resolving is safe to
+        call repeatedly.
+        """
+        self._scoring_fn = self._resolve_scoring_fn(scoring_fn)
 
     def register_agent(self, agent: Any) -> None:
         self.ledger.save_agent_card(agent)
@@ -782,6 +848,15 @@ class Registry:
             if not self._dependencies_satisfied(task):
                 continue
             ready.append(task)
+        if self._scoring_fn is not None:
+            # Defensive: treat None / NaN returns as 0.0 so a misbehaving
+            # scorer can never break sorted() (NaN ordering raises in
+            # CPython). Sort descending — higher score claims first.
+            return sorted(
+                ready,
+                key=lambda task, _fn=self._scoring_fn: _safe_score(_fn, task),
+                reverse=True,
+            )
         return ready
 
     def save_handoff_result(
