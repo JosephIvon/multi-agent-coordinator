@@ -103,6 +103,13 @@ MULTICA_OUTBOX_DIR=.agent-context/outbox             # structured JSON for
                                                        # via POST /outbox/replay
 MULTICA_OUTBOX_MAX_ATTEMPTS=3                         # in-process retry budget
 MULTICA_OUTBOX_BACKOFF_SECONDS=0.5                    # initial backoff (doubles)
+# Every outbound POST also carries an Idempotency-Key header:
+#   review  -> "review:<issue_id>"
+#   audit   -> "audit:<issue_id>:<event_type>"
+# so Multica can collapse a successful double-dispatch (in-process
+# retry, outbox replay, or webhook retry) into a single side-effect.
+# The key is persisted in the outbox JSON entry so manual drains
+# carry the same dedup semantics as the original POST.
 ```
 
 When `MULTICA_API_URL` is empty the reverse channel is a no-op (dev mode).
@@ -118,6 +125,19 @@ so transient network blips are absorbed without ever touching disk.
 `REVIEW_FALLBACK_DIR` is still honoured as a deprecated alias for
 `MULTICA_OUTBOX_DIR` for backward compatibility, but new
 deployments should set `MULTICA_OUTBOX_DIR` explicitly.
+
+#### Idempotency
+
+Every outbound POST carries an `Idempotency-Key` header derived from
+the logical action: `review:<issue_id>` for review packets,
+`audit:<issue_id>:<event_type>` for audit-trail comments. Multica
+should treat the second occurrence of a key it has already accepted
+as a no-op, so a redundant retry (in-process after a transient 5xx,
+or an outbox replay from cron) cannot double-post the same comment.
+Older outbox entries written before this feature shipped do not carry
+an `idempotency_key` field; drains on those entries omit the header
+entirely, which keeps forward-compat with on-disk state from previous
+deployments.
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/healthz

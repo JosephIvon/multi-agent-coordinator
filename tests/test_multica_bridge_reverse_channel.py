@@ -82,6 +82,18 @@ class _FakeResponse:
 
     def __exit__(self, *args):
         return False
+def _idem_of(req):
+    """Return the ``Idempotency-Key`` value on a urllib Request.
+
+    urllib normalizes header names to title-case-then-lowercase-rest
+    (``Idempotency-key``), so a literal lookup is brittle. Match by
+    lowering all keys -- wire traffic to Multica is case-insensitive
+    per RFC 7230 either way.
+    """
+    return next(
+        (v for k, v in req.headers.items() if k.lower() == "idempotency-key"),
+        None,
+    )
 
 
 def _completed_payload(issue_id="R-1", agent_id="claude-frontend"):
@@ -917,3 +929,228 @@ def test_replay_outbox_skipped_when_multica_url_empty(
     summary = r.json()
     assert summary["skipped"] is True
     assert summary["replayed"] == 0
+def test_post_json_to_multica_sets_idempotency_key_header(
+    isolated_bridge, monkeypatch,
+):
+    """When called with ``idempotency_key=...``, the helper must attach
+    an ``Idempotency-Key`` header on every retry attempt so Multica
+    can dedupe a logical action across retries and outbox replays.
+    """
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(201)
+
+    isolated_bridge.MULTICA_API_URL = "http://multica.local:8080"
+    monkeypatch.setattr(isolated_bridge.time, "sleep", lambda s: None)
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    ok, status, _ = isolated_bridge._post_json_to_multica(
+        "/api/issues/IDEMP-1/comments",
+        "body",
+        timeout=2,
+        max_attempts=2,
+        backoff=0.0,
+        idempotency_key="review:IDEMP-1",
+    )
+    assert ok is True
+    assert status == 201
+    assert captured == ["review:IDEMP-1"]
+
+
+def test_post_json_to_multica_omits_header_when_no_key(
+    isolated_bridge, monkeypatch,
+):
+    """Without an ``idempotency_key`` the request must NOT carry the
+    ``Idempotency-Key`` header -- otherwise unrelated callers would
+    accidentally collide on Multica's dedup table.
+    """
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(200)
+
+    isolated_bridge.MULTICA_API_URL = "http://multica.local:8080"
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    isolated_bridge._post_json_to_multica(
+        "/api/issues/X/comments", "body", timeout=1,
+    )
+    assert captured == [None]
+
+
+def test_review_post_carries_review_idempotency_key(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """``_on_agent_completed`` -> ``_post_review_to_multica`` must set
+    ``Idempotency-Key: review:<issue_id>`` so Multica can dedupe a
+    successful double-dispatch (e.g. webhook retry vs. RPC).
+    """
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
+
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    _seed_submitted_task(isolated_client, "IDEMP-R")
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "IDEMP-R",
+                "agent_id": "claude-frontend",
+                "changed_files": ["src/x.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    assert r.status_code == 200
+    review_keys = [k for k in captured if k and k.startswith("review:")]
+    assert review_keys == ["review:IDEMP-R"], captured
+
+
+def test_audit_post_carries_audit_idempotency_key(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """The audit-trail hook must set
+    ``Idempotency-Key: audit:<issue_id>:<event_type>`` so an audit POST
+    fired twice for the same logical event is collapsed server-side.
+    """
+    monkeypatch.setattr(isolated_bridge, "AUDIT_TRAIL", True)
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={"type": "issue.created", "data": {"issue_id": "IDEMP-A", "title": "x"}},
+    )
+    assert r.status_code == 200
+    assert captured == ["audit:IDEMP-A:issue.created"]
+
+
+def test_outbox_entry_persists_idempotency_key(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """When a review POST fails after all retries the outbox JSON entry
+    must persist the same ``idempotency_key`` the original POST carried
+    so a drain replays with identical dedup semantics.
+    """
+    outbox = tmp_path / "outbox"
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
+
+    def boom(*a, **kw):
+        raise urllib_error.URLError("nope")
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", boom)
+    _seed_submitted_task(isolated_client, "IDEMP-OUT")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "IDEMP-OUT",
+                "agent_id": "claude-frontend",
+                "changed_files": ["src/x.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+
+    files = list(outbox.glob("*.json"))
+    assert len(files) == 1
+    entry = json.loads(files[0].read_text(encoding="utf-8"))
+    assert entry["idempotency_key"] == "review:IDEMP-OUT"
+
+
+def test_outbox_replay_resends_persisted_idempotency_key(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """A drain must re-send the persisted ``idempotency_key`` so Multica
+    sees the same key on every delivery attempt for the same logical
+    action (in-process retry + outbox replay + manual drain).
+    """
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    entry = {
+        "kind": "review",
+        "issue_id": "IDEMP-DRAIN",
+        "path": "/api/issues/IDEMP-DRAIN/comments",
+        "body": "review packet",
+        "idempotency_key": "review:IDEMP-DRAIN",
+        "first_attempt": 1,
+        "last_attempt": 1,
+        "attempts": 1,
+    }
+    (outbox / "1-IDEMP-DRAIN-review.json").write_text(
+        json.dumps(entry), encoding="utf-8",
+    )
+
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    r = isolated_client.post("/outbox/replay")
+    assert r.status_code == 200
+    assert r.json()["succeeded"] == 1
+    assert captured == ["review:IDEMP-DRAIN"]
+
+
+def test_outbox_replay_without_idempotency_key_omits_header(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """Older outbox entries written before Round 10 don't carry an
+    ``idempotency_key`` field -- a drain must still succeed and simply
+    omit the header. This keeps forward-compat with on-disk entries
+    produced by previous deployments.
+    """
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    entry = {
+        "kind": "review",
+        "issue_id": "LEGACY",
+        "path": "/api/issues/LEGACY/comments",
+        "body": "old review packet",
+        # NB: no "idempotency_key" key here on purpose
+        "first_attempt": 1,
+        "last_attempt": 1,
+        "attempts": 1,
+    }
+    (outbox / "1-LEGACY-review.json").write_text(
+        json.dumps(entry), encoding="utf-8",
+    )
+
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    captured = []
+
+    def fake_urlopen(*a, **kw):
+        captured.append(_idem_of(a[0]))
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    r = isolated_client.post("/outbox/replay")
+    assert r.status_code == 200
+    assert r.json()["succeeded"] == 1
+    assert captured == [None]

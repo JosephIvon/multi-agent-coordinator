@@ -204,6 +204,7 @@ def _post_json_to_multica(
     *,
     max_attempts: int | None = None,
     backoff: float | None = None,
+    idempotency_key: str | None = None,
 ) -> tuple[bool, int | None, BaseException | None]:
     """POST a JSON envelope to Multica with bounded exponential retry.
 
@@ -218,6 +219,15 @@ def _post_json_to_multica(
     exponential backoff starting at ``backoff`` seconds (default
     ``OUTBOX_BACKOFF_SECONDS``). On a 2xx response the loop returns
     immediately with the status code.
+
+    ``idempotency_key`` (when provided) is sent as the
+    ``Idempotency-Key`` header so Multica can dedupe a successful
+    retry that races with its own retries on the first attempt. The
+    caller picks a stable key per logical action -- e.g.
+    ``f"review:{issue_id}"`` for review packets,
+    ``f"audit:{issue_id}:{event_type}"`` for audit-trail comments --
+    so an in-process retry and an outbox replay end up sending the
+    same key.
 
     Returns ``(ok, status_code, exception)`` where ``ok`` is True iff
     Multica returned 2xx. ``status_code`` is the HTTP status on a
@@ -235,14 +245,17 @@ def _post_json_to_multica(
     payload = json.dumps({"body": body}).encode("utf-8")
     last_exc: BaseException | None = None
     for attempt in range(1, max_attempts + 1):
+        headers = {
+            "Content-Type": "application/json",
+            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
+        }
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         req = urllib.request.Request(
             url,
             data=payload,
             method="POST",
-            headers={
-                "Content-Type": "application/json",
-                **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
-            },
+            headers=headers,
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -267,7 +280,10 @@ def _post_review_to_multica(issue_id: str, body: str) -> bool:
         logger.info("reverse channel skipped: MULTICA_API_URL not set")
         return True
     ok, status, exc = _post_json_to_multica(
-        f"/api/issues/{issue_id}/comments", body, timeout=10,
+        f"/api/issues/{issue_id}/comments",
+        body,
+        timeout=10,
+        idempotency_key=f"review:{issue_id}",
     )
     if ok:
         logger.info("reverse channel: posted review packet for %s (status=%d)", issue_id, status)
@@ -312,6 +328,7 @@ def _write_outbox_entry(
             "issue_id": str(issue_id),
             "path": path,
             "body": body,
+            "idempotency_key": f"{kind}:{issue_id}",
             "first_attempt": ts_ms,
             "last_attempt": ts_ms,
             "attempts": 1,
@@ -330,7 +347,10 @@ def _write_outbox_entry(
 def _drain_outbox() -> dict[str, Any]:
     """Replay every outbox entry against Multica and delete the file
     on success. Best-effort: failures are left in the outbox for the
-    next attempt.
+    next attempt. The persisted ``idempotency_key`` (if any) is re-sent
+    on the replay, so Multica sees the same key on every drain
+    attempt for the same logical action -- identical dedup semantics
+    to a fresh in-process POST.
     """
     if not MULTICA_API_URL:
         return {"replayed": 0, "succeeded": 0, "failed": 0, "skipped": True}
@@ -349,6 +369,7 @@ def _drain_outbox() -> dict[str, Any]:
             continue
         ok, status, exc = _post_json_to_multica(
             entry["path"], entry["body"], timeout=10,
+            idempotency_key=entry.get("idempotency_key"),
         )
         replayed += 1
         if ok:
@@ -414,7 +435,10 @@ def _audit_to_multica(issue_id: str, event_type: str, summary: str) -> None:
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     body = f"### [MAC audit] `{event_type}` @ {ts}\n\n{summary}\n"
     ok, status, exc = _post_json_to_multica(
-        f"/api/issues/{issue_id}/comments", body, timeout=5,
+        f"/api/issues/{issue_id}/comments",
+        body,
+        timeout=5,
+        idempotency_key=f"audit:{issue_id}:{event_type}",
     )
     if ok:
         logger.info("audit trail: posted %s for %s (status=%d)", event_type, issue_id, status)
