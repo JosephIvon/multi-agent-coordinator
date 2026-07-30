@@ -211,6 +211,25 @@ If `mac.metrics.compute_metrics` raises (corrupt ledger, etc.),
 the `mac` section still returns 200 with `{"error": ...}` --
 one broken subsystem never breaks the dashboard.
 
+## Task views
+
+`GET /tasks?status=&project_context=&agent_id=&limit=` returns a
+paginated JSON view of every task in the MAC ledger. `limit` is
+clamped to 1..500 (default 100); the response always carries
+`count` (rows returned), `total` (rows matched), `truncated`
+(bool) and `filters` (echo of the actual query).
+
+`GET /tasks/<task_id>` returns the full record plus handoff
+result. Unknown ids return 404 with a structured body:
+
+```json
+{"detail": {"error": "unknown_task", "task_id": "..."}}
+```
+
+Both endpoints strip the `multica-` prefix into a separate
+`multica_issue_id` field so dashboards can render the same id
+Multica uses without post-processing.
+
 ## Layout
 
 ```

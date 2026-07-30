@@ -1085,6 +1085,109 @@ def list_digests() -> dict[str, Any]:
     return {"count": len(entries), "entries": entries}
 
 
+def _task_to_json(task: TaskTransfer) -> dict[str, Any]:
+    """Render a TaskTransfer as a JSON-friendly dict.
+
+    The pydantic model would serialise via ``model_dump_json``, but
+    that includes payload/context/test_contract objects that are
+    large for ops dashboards. Here we surface the headline fields
+    an operator cares about plus a few quality-of-life additions
+    (``multica_issue_id`` strips the ``multica-`` prefix so the
+    same id Multica uses appears in the response).
+    """
+    return {
+        "task_id": task.task_id,
+        "multica_issue_id": task.task_id.removeprefix("multica-"),
+        "status": task.status,
+        "title": task.title,
+        "description": task.description,
+        "project_context": task.project_context,
+        "source_agent_id": task.source_agent_id,
+        "target_agent_id": task.target_agent_id,
+        "priority": task.priority,
+        "plan_id": task.plan_id,
+        "depends_on": list(task.depends_on),
+        "max_hops": task.max_hops,
+        "current_hops": task.current_hops,
+        "retry_count": task.retry_count,
+        "fallback_agent_id": task.fallback_agent_id,
+        "error_code": task.error_code,
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+def _task_row(task: TaskTransfer) -> dict[str, Any]:
+    """Render a TaskTransfer as a one-line ops row."""
+    return {
+        "task_id": task.task_id,
+        "multica_issue_id": task.task_id.removeprefix("multica-"),
+        "status": task.status,
+        "title": task.title,
+        "project_context": task.project_context,
+        "target_agent_id": task.target_agent_id,
+        "priority": task.priority,
+        "updated_at": task.updated_at,
+    }
+
+
+@app.get("/tasks")
+def list_tasks(
+    status: str | None = None,
+    project_context: str | None = None,
+    agent_id: str | None = None,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """JSON task view over the bridge. Filters mirror the
+    ``mac.registry.Registry.list_tasks`` signature, plus a
+    ``limit`` cap (default 100) to keep responses small for
+    dashboards.
+
+    Result rows are the compact ``_task_row`` shape -- use
+    ``GET /tasks/<task_id>`` for the full breakdown.
+    """
+    cap = max(1, min(int(limit), 500))
+    tasks = registry.list_tasks(
+        status=status,
+        agent_id=agent_id,
+        project_context=project_context,
+    )
+    rows = [_task_row(t) for t in tasks[:cap]]
+    return {
+        "count": len(rows),
+        "total": len(tasks),
+        "truncated": len(tasks) > cap,
+        "filters": {
+            "status": status,
+            "project_context": project_context,
+            "agent_id": agent_id,
+            "limit": cap,
+        },
+        "tasks": rows,
+    }
+
+
+@app.get("/tasks/{task_id}")
+def get_task(task_id: str) -> dict[str, Any]:
+    """Return the full record for a single task, plus its
+    handoff result and project context.
+
+    404 with a structured body when the task is unknown so a
+    UI can distinguish "wrong id" from "server error".
+    """
+    ledger = registry.ledger
+    row = ledger.get_task_transfer(task_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "unknown_task", "task_id": task_id},
+        )
+    handoff = registry.get_handoff_result(task_id)
+    out = _task_to_json(row)
+    out["handoff"] = handoff.model_dump() if handoff is not None else None
+    return {"task": out, "has_handoff": handoff is not None}
+
+
 @app.get("/agents")
 def list_agents() -> dict[str, Any]:
     """List registered agents (with their last heartbeat and load).
