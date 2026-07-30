@@ -68,9 +68,11 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from collections.abc import Callable
 from typing import Any
 
@@ -105,6 +107,56 @@ GUARDED_PATTERNS = [
 ]
 REFUSE_ON_BLOCKING = os.environ.get("MULTICA_REFUSE_ON_BLOCKING", "true").lower() not in ("0", "false", "no", "")
 AUDIT_TRAIL = os.environ.get("MULTICA_AUDIT_TRAIL", "false").lower() not in ("0", "false", "no", "")
+
+# Lightweight traffic counters for the /metrics endpoint. Resets on
+# process restart -- the SQLite ledger is the durable source of truth.
+# Guarded by a lock so concurrent webhook + replay bursts cannot lose
+# increments.
+_BRIDGE_LOCK = threading.Lock()
+_WEBHOOK_TOTAL: Counter[str] = Counter()
+_WEBHOOK_ERRORS: dict[str, Counter[str]] = {}
+_REVIEW_POST: Counter[str] = Counter()
+_AUDIT_POST: Counter[str] = Counter()
+_OUTBOX_WRITES: Counter[str] = Counter()
+_OUTBOX_DRAINS: Counter[str] = Counter()
+_BRIDGE_STARTED_AT = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _bump_webhook(event_type: str, *, error_code: str | None = None) -> None:
+    """Increment the bridge traffic counter for a single webhook.
+
+    Safe to call from concurrent webhook handlers; the lock is
+    uncontended in the typical webhook flow and only held for a
+    couple of dict ops. ``error_code`` (when present) increments a
+    per-event-type sub-counter so dashboards can split failures by
+    category without flattening them all into one bucket.
+    """
+    with _BRIDGE_LOCK:
+        _WEBHOOK_TOTAL[event_type] += 1
+        if error_code is not None:
+            sub = _WEBHOOK_ERRORS.setdefault(event_type, Counter())
+            sub[error_code] += 1
+
+
+def _bump_review_post(outcome: str) -> None:
+    with _BRIDGE_LOCK:
+        _REVIEW_POST[outcome] += 1
+
+
+def _bump_audit_post(outcome: str) -> None:
+    with _BRIDGE_LOCK:
+        _AUDIT_POST[outcome] += 1
+
+
+def _bump_outbox(kind: str, outcome: str) -> None:
+    """``kind`` is ``"write"`` or ``"drain"``; ``outcome`` is a free-form
+    string the caller picks (e.g. ``"failed"`` for writes, ``"drained"``
+    or ``"kept"`` for drains)."""
+    with _BRIDGE_LOCK:
+        if kind == "write":
+            _OUTBOX_WRITES[outcome] += 1
+        elif kind == "drain":
+            _OUTBOX_DRAINS[outcome] += 1
 
 logger = logging.getLogger("multica_bridge")
 
@@ -288,8 +340,11 @@ def _post_review_to_multica(issue_id: str, body: str) -> bool:
         idempotency_key=f"review:{issue_id}",
     )
     if ok:
+        _bump_review_post("ok")
         logger.info("reverse channel: posted review packet for %s (status=%d)", issue_id, status)
         return True
+    _bump_review_post("failed")
+    _bump_outbox("write", "failed")
     if exc is not None:
         logger.warning("reverse channel: failed to post %s (%s); writing outbox entry", issue_id, exc)
     else:
@@ -378,11 +433,13 @@ def _drain_outbox() -> dict[str, Any]:
             try:
                 os.remove(full_path)
                 succeeded += 1
+                _bump_outbox("drain", "drained")
                 logger.info("outbox: drained %s for issue=%s", name, entry.get("issue_id"))
             except OSError as e:
                 logger.warning("outbox: drained %s but could not remove file: %s", name, e)
         else:
             failed += 1
+            _bump_outbox("drain", "kept")
             logger.warning(
                 "outbox: %s for issue=%s still failing (status=%s exc=%s)",
                 name, entry.get("issue_id"), status, exc,
@@ -443,10 +500,13 @@ def _audit_to_multica(issue_id: str, event_type: str, summary: str) -> None:
         idempotency_key=f"audit:{issue_id}:{event_type}",
     )
     if ok:
+        _bump_audit_post("ok")
         logger.info("audit trail: posted %s for %s (status=%d)", event_type, issue_id, status)
     elif exc is not None:
+        _bump_audit_post("failed")
         logger.warning("audit trail: failed to post %s/%s (%s)", issue_id, event_type, exc)
     else:
+        _bump_audit_post("failed")
         logger.warning("audit trail: non-2xx %d for %s/%s", status, issue_id, event_type)
 
 
@@ -656,18 +716,26 @@ HANDLERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
 async def multica_webhook(request: Request) -> dict[str, Any]:
     body = await request.body()
     if not _verify(body, request.headers.get("X-Multica-Signature", "")):
+        _bump_webhook("__auth__", error_code="bad_signature")
         raise HTTPException(401, "bad_signature")
     event = json.loads(body or b"{}")
-    handler = HANDLERS.get(event.get("type"))
+    event_type = event.get("type") or "__no_type__"
+    handler = HANDLERS.get(event_type)
     if handler is None:
-        return {"ignored": event.get("type")}
+        _bump_webhook(event_type, error_code="unknown_type")
+        return {"ignored": event_type}
+    _bump_webhook(event_type)
     data = event.get("data", {}) or {}
-    result = handler(data)
+    try:
+        result = handler(data)
+    except Exception as exc:  # counter must still fire on handler error
+        _bump_webhook(event_type, error_code=type(exc).__name__)
+        raise
     # Fire-and-forget audit so reviewers see the full lifecycle on the
     # original Multica issue without having to round-trip via mac-agent.
     _audit_to_multica(
         data.get("issue_id", ""),
-        event.get("type", ""),
+        event_type,
         _summarize_handler_result(result),
     )
     return result
@@ -676,6 +744,77 @@ async def multica_webhook(request: Request) -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/metrics")
+def metrics() -> dict[str, Any]:
+    """Bridge traffic counters + MAC ledger metrics in one JSON body.
+
+    Response shape::
+
+        {
+          "bridge": {
+            "started_at": "2026-...",
+            "webhook_total": {"issue.created": 12, "agent.started": 9, ...},
+            "webhook_errors": {"__auth__": {"bad_signature": 0}, ...},
+            "review_post": {"ok": 8, "failed": 1},
+            "audit_post": {"ok": 21, "failed": 0},
+            "outbox_writes": {"failed": 1},
+            "outbox_drains": {"drained": 1, "kept": 0},
+            "outbox_pending": 0,
+            "active_agents": 2,
+          },
+          "mac": {  # delegated to mac.metrics.compute_metrics
+              ...six key indicators + samples...
+          }
+        }
+
+    Cheap to query -- Counter ops are O(1), and the MAC side runs a
+    handful of SQLite reads. Use this for ops dashboards; the durable
+    truth still lives in the SQLite ledger and mac.metrics can be run
+    any time via ``mac-agent metrics`` from the CLI.
+    """
+    with _BRIDGE_LOCK:
+        webhook_total = dict(_WEBHOOK_TOTAL)
+        webhook_errors = {
+            event_type: dict(errors)
+            for event_type, errors in _WEBHOOK_ERRORS.items()
+        }
+        review_post = dict(_REVIEW_POST)
+        audit_post = dict(_AUDIT_POST)
+        outbox_writes = dict(_OUTBOX_WRITES)
+        outbox_drains = dict(_OUTBOX_DRAINS)
+
+    outbox_pending = 0
+    if os.path.isdir(OUTBOX_DIR):
+        outbox_pending = sum(
+            1 for name in os.listdir(OUTBOX_DIR) if name.endswith(".json")
+        )
+
+    active_agents = sum(
+        1 for a in registry.ledger.list_agent_cards()
+        if a.status == "online"
+    )
+
+    bridge = {
+        "started_at": _BRIDGE_STARTED_AT,
+        "webhook_total": webhook_total,
+        "webhook_errors": webhook_errors,
+        "review_post": review_post,
+        "audit_post": audit_post,
+        "outbox_writes": outbox_writes,
+        "outbox_drains": outbox_drains,
+        "outbox_pending": outbox_pending,
+        "active_agents": active_agents,
+    }
+
+    try:
+        from mac.metrics import compute_metrics
+        mac_metrics = compute_metrics(registry.ledger)
+    except Exception as exc:  # metrics should never break /metrics
+        mac_metrics = {"error": type(exc).__name__, "message": str(exc)}
+
+    return {"bridge": bridge, "mac": mac_metrics}
 
 
 @app.get("/outbox")

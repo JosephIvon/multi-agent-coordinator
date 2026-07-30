@@ -179,6 +179,38 @@ Invoke-RestMethod http://127.0.0.1:8765/healthz
 requests.get("http://127.0.0.1:8765/healthz").json()
 ```
 
+## Observability
+
+`GET /metrics` returns a single JSON body with two top-level keys:
+
+- `bridge` -- in-process traffic counters (resets on restart):
+  - `webhook_total{event_type}` -- count of every handled webhook
+    by event type, including `unknown_type` failures and the
+    synthetic `__auth__` bucket for HMAC failures
+  - `webhook_errors{event_type}{code}` -- nested per-event-type
+    sub-counter for failures (`bad_signature`, `unknown_type`,
+    handler exception class names)
+  - `review_post{outcome}` -- outbox POST outcomes
+    (`ok` / `failed`)
+  - `audit_post{outcome}` -- audit-trail POST outcomes
+    (`ok` / `failed`)
+  - `outbox_writes{outcome}` -- outbox fallback writes
+    (`failed` = a review POST gave up and was written to disk)
+  - `outbox_drains{outcome}` -- replay outcomes
+    (`drained` = success-deleted, `kept` = still failing)
+  - `outbox_pending` -- gauge: `.json` files currently in
+    `MULTICA_OUTBOX_DIR`
+  - `active_agents` -- gauge: agents with status `online`
+- `mac` -- durable ledger metrics computed by
+  `mac.metrics.compute_metrics`. Six indicators
+  (`task_cycle_time_seconds`, `handoff_success_rate`,
+  `quality_gate_pass_rate`, `retry_rate`, `conflict_rate`,
+  `active_agents`) plus a `samples` block.
+
+If `mac.metrics.compute_metrics` raises (corrupt ledger, etc.),
+the `mac` section still returns 200 with `{"error": ...}` --
+one broken subsystem never breaks the dashboard.
+
 ## Layout
 
 ```

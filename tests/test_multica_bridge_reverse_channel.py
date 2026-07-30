@@ -1380,3 +1380,178 @@ def test_list_digests_returns_shipped_files(
     assert e["kind"] == "digest"
     assert e["count"] == 1
     assert e["issue_ids"] == ["DIG-LIST"]
+def test_metrics_endpoint_returns_bridge_and_mac_sections(
+    isolated_client,
+):
+    """GET /metrics must expose both the bridge traffic counters and
+    the durable MAC ledger metrics under two top-level keys so a
+    dashboard can hit one URL for everything."""
+    r = isolated_client.get("/metrics")
+    assert r.status_code == 200
+    payload = r.json()
+    assert "bridge" in payload
+    assert "mac" in payload
+    # MAC side delegates to mac.metrics.compute_metrics
+    assert "task_cycle_time_seconds" in payload["mac"]
+    # Bridge side has all six counter slots
+    bridge = payload["bridge"]
+    for key in (
+        "started_at", "webhook_total", "webhook_errors", "review_post",
+        "audit_post", "outbox_writes", "outbox_drains",
+        "outbox_pending", "active_agents",
+    ):
+        assert key in bridge, f"missing bridge key: {key}"
+
+
+def test_metrics_counts_a_successful_review_post(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """``/metrics`` review_post["ok"] must increment by 1 after a
+    successful agent.completed webhook (against a mocked Multica
+    POST)."""
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
+
+    def fake_urlopen(*a, **kw):
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    # baseline
+    r0 = isolated_client.get("/metrics").json()
+    base_ok = r0["bridge"]["review_post"].get("ok", 0)
+    _seed_submitted_task(isolated_client, "MET-R1")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "MET-R1",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r1 = isolated_client.get("/metrics").json()
+    assert r1["bridge"]["review_post"]["ok"] == base_ok + 1
+
+
+def test_metrics_counts_a_failed_outbox_write(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """When every retry of a review POST fails, the bridge writes to
+    the outbox and both ``outbox_writes["failed"]`` and
+    ``review_post["failed"]`` must increment -- the latter because
+    Multica never accepted it."""
+    outbox = tmp_path / "outbox"
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
+
+    def boom(*a, **kw):
+        raise urllib_error.URLError("nope")
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", boom)
+
+    r0 = isolated_client.get("/metrics").json()
+    base_review_failed = r0["bridge"]["review_post"].get("failed", 0)
+    base_outbox_failed = r0["bridge"]["outbox_writes"].get("failed", 0)
+    base_pending = r0["bridge"]["outbox_pending"]
+    _seed_submitted_task(isolated_client, "MET-OUT")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "MET-OUT",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r1 = isolated_client.get("/metrics").json()
+    assert r1["bridge"]["review_post"]["failed"] == base_review_failed + 1
+    assert r1["bridge"]["outbox_writes"]["failed"] == base_outbox_failed + 1
+    assert r1["bridge"]["outbox_pending"] == base_pending + 1
+
+
+def test_metrics_per_event_type_webhook_counters(
+    isolated_client, isolated_bridge,
+):
+    """A successful issue.created + agent.started pair bumps
+    webhook_total for each event type by exactly one."""
+    r0 = isolated_client.get("/metrics").json()
+    base_created = r0["bridge"]["webhook_total"].get("issue.created", 0)
+    base_started = r0["bridge"]["webhook_total"].get("agent.started", 0)
+    _seed_submitted_task(isolated_client, "MET-W")
+    r1 = isolated_client.get("/metrics").json()
+    assert r1["bridge"]["webhook_total"]["issue.created"] == base_created + 1
+    assert r1["bridge"]["webhook_total"]["agent.started"] == base_started + 1
+
+
+def test_metrics_counts_bad_signature_under_special_event_type(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """A webhook with the wrong HMAC must bump the
+    webhook_errors[<__auth__>][bad_signature] counter and NOT count
+    as a successful ``webhook_total`` increment for the event."""
+    monkeypatch.setattr(isolated_bridge, "WEBHOOK_SECRET", "secret")
+    bad = "0" * 64
+    body = json.dumps(
+        {"type": "issue.created", "data": {"issue_id": "METAUTH", "title": "x"}}
+    ).encode("utf-8")
+    r = isolated_client.post(
+        "/webhook/multica", content=body,
+        headers={"X-Multica-Signature": bad, "Content-Type": "application/json"},
+    )
+    assert r.status_code == 401
+    m = isolated_client.get("/metrics").json()
+    assert m["bridge"]["webhook_errors"].get("__auth__", {}).get("bad_signature", 0) >= 1
+    # NB: __auth__ is a synthetic key we use so the genuine
+    # issue.created counter is NOT bumped on auth failure.
+    assert m["bridge"]["webhook_total"].get("issue.created", 0) == 0
+
+
+def test_metrics_outbox_pending_reflects_files_on_disk(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """``bridge.outbox_pending`` is derived from
+    ``MULTICA_OUTBOX_DIR`` glob -- writing a stray ``.json`` file
+    there increases the gauge even if the bridge never wrote it."""
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    (outbox / "01-stale.json").write_text(
+        json.dumps({"kind": "review", "issue_id": "STALE", "path": "/x", "body": "y",
+                    "first_attempt": 1, "last_attempt": 1, "attempts": 1,
+                    "idempotency_key": "review:STALE"}),
+        encoding="utf-8",
+    )
+    m = isolated_client.get("/metrics").json()
+    assert m["bridge"]["outbox_pending"] == 1
+
+
+def test_metrics_endpoint_survives_ledger_call_failure(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """Even if mac.metrics blows up, /metrics must still return 200
+    with the bridge section fully populated -- one broken subsystem
+    must not break the dashboard."""
+    from mac import metrics as _mac_metrics
+
+    def boom(ledger):
+        raise RuntimeError("ledger on fire")
+
+    monkeypatch.setattr(_mac_metrics, "compute_metrics", boom)
+    r = isolated_client.get("/metrics")
+    assert r.status_code == 200
+    payload = r.json()
+    # bridge section is intact
+    assert "bridge" in payload
+    assert "started_at" in payload["bridge"]
+    # mac section reports the failure rather than crashing
+    assert payload["mac"].get("error") == "RuntimeError"
+    assert "ledger on fire" in payload["mac"].get("message", "")
