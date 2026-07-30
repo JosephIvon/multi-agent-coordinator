@@ -66,6 +66,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -96,6 +97,7 @@ REVIEW_FALLBACK_DIR = os.environ.get("REVIEW_FALLBACK_DIR", ".agent-context/revi
 OUTBOX_DIR = os.environ.get("MULTICA_OUTBOX_DIR", ".agent-context/outbox")
 OUTBOX_MAX_ATTEMPTS = int(os.environ.get("MULTICA_OUTBOX_MAX_ATTEMPTS", "3"))
 OUTBOX_BACKOFF_SECONDS = float(os.environ.get("MULTICA_OUTBOX_BACKOFF_SECONDS", "0.5"))
+DIGESTS_DIR = os.environ.get("MULTICA_DIGESTS_DIR", ".agent-context/digests")
 GUARDED_PATTERNS = [
     p.strip()
     for p in os.environ.get("MULTICA_GUARDED_PATHS", "").split(",")
@@ -715,6 +717,233 @@ def replay_outbox() -> dict[str, Any]:
     snapshot.
     """
     return _drain_outbox()
+
+
+def _safe_parse_iso(ts: str) -> datetime.datetime | None:
+    """Parse a Multica-style ISO timestamp, tolerating trailing ``Z``.
+
+    Returns ``None`` for unparsable strings so the digest endpoint can
+    silently skip tasks with malformed timestamps instead of 500-ing.
+    """
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _collect_digest_items(
+    since_iso: str, until_iso: str, project: str | None,
+) -> list[dict[str, Any]]:
+    """Return ``[{task, handoff}]`` rows where ``handoff.timestamp``
+    falls in ``[since_iso, until_iso]`` and ``task.project_context``
+    matches ``project`` (when provided).
+
+    Tasks without a handoff result or with an unparsable timestamp
+    are skipped silently -- they may be in-progress or were never
+    closed by MAC (e.g. failures rolled back to ``running``).
+    """
+    since_dt = _safe_parse_iso(since_iso)
+    until_dt = _safe_parse_iso(until_iso)
+    tasks = registry.list_tasks(status="completed", project_context=project)
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        handoff = registry.get_handoff_result(task.task_id)
+        if handoff is None:
+            continue
+        ts_dt = _safe_parse_iso(handoff.timestamp)
+        if ts_dt is None:
+            continue
+        if since_dt is not None and ts_dt < since_dt:
+            continue
+        if until_dt is not None and ts_dt > until_dt:
+            continue
+        rows.append({"task": task, "handoff": handoff})
+    return rows
+
+
+def _render_digest_markdown(
+    items: list[dict[str, Any]],
+    since_iso: str,
+    until_iso: str,
+    project: str | None,
+) -> str:
+    """Render the digest body as markdown.
+
+    Layout: a header summarising the window, then one bullet per
+    task with verification status + changed files + risks. Designed
+    to paste straight into a Multica project comment or a standup
+    channel.
+    """
+    project_label = project or "all"
+    header = (
+        f"# MAC review digest\n\n"
+        f"- Window: `{since_iso}` -> `{until_iso}`\n"
+        f"- Project: `{project_label}`\n"
+        f"- Tasks completed: **{len(items)}**\n"
+    )
+    if not items:
+        return header + "\n_No tasks completed in this window._\n"
+    by_agent: dict[str, int] = {}
+    for row in items:
+        handoff = row["handoff"]
+        by_agent[handoff.agent_id] = by_agent.get(handoff.agent_id, 0) + 1
+    agent_line = ", ".join(
+        f"`{name}` x {count}" for name, count in sorted(by_agent.items())
+    )
+    body_parts = [header, f"- Agents: {agent_line}\n"]
+    for row in items:
+        task = row["task"]
+        handoff = row["handoff"]
+        ver = ", ".join(
+            f"{v.command}:{v.result}" for v in handoff.verification
+        ) or "(none)"
+        files = ", ".join(handoff.changed_files) or "(none)"
+        risks = "; ".join(handoff.risks) or "(none)"
+        body_parts.append(
+            f"\n## `{task.task_id}`\n\n"
+            f"- Issue: `{task.title or task.task_id}`\n"
+            f"- Agent: `{handoff.agent_id}` @ "
+            f"{handoff.timestamp}\n"
+            f"- Verification: {ver}\n"
+            f"- Changed files: {files}\n"
+            f"- Risks: {risks}\n"
+        )
+    return "".join(body_parts)
+
+
+def _write_digest_file(
+    items: list[dict[str, Any]],
+    since_iso: str,
+    until_iso: str,
+    project: str | None,
+    body: str,
+) -> str:
+    """Persist the digest to ``DIGESTS_DIR`` so an operator or cron
+    can ship it to Multica later. Returns the absolute path of the
+    written file.
+
+    Filename uses a window stamp and project slug; reruns for the
+    same window overwrite the same file (digest is naturally
+    idempotent across the same since/until pair).
+    """
+    os.makedirs(DIGESTS_DIR, exist_ok=True)
+    project_slug = "all" if not project else re.sub(r"[^A-Za-z0-9._-]", "_", project)
+    # Truncate the stamp to second precision so two requests within
+    # the same wall-clock second overwrite the same file. Cron jobs
+    # running every minute are well above this granularity anyway,
+    # and second-level dedup prevents the directory from filling up
+    # under frequent retries.
+    def _to_second_stamp(iso: str) -> str:
+        ts = _safe_parse_iso(iso)
+        if ts is None:
+            return re.sub(r"[^0-9TZ-]", "", iso)
+        return ts.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    stamp = (
+        f"{_to_second_stamp(since_iso)}_{_to_second_stamp(until_iso)}"
+        .replace(":", "")  # Windows rejects ':' in filenames
+    )
+    fname = f"digest-{project_slug}-{stamp}.md"
+    full = os.path.join(DIGESTS_DIR, fname)
+    metadata = {
+        "kind": "digest",
+        "since": since_iso,
+        "until": until_iso,
+        "project": project,
+        "count": len(items),
+        "issue_ids": [
+            row["task"].task_id.removeprefix("multica-") for row in items
+        ],
+        "body_file": os.path.basename(full),
+    }
+    with open(full, "wb") as f:
+        f.write(body.encode("utf-8"))
+        f.write(b"\n")
+    sidecar = full.removesuffix(".md") + ".json"
+    with open(sidecar, "wb") as f:
+        f.write(json.dumps(metadata, indent=2).encode("utf-8"))
+    return os.path.abspath(full)
+
+
+@app.get("/reviews/digest")
+def reviews_digest(
+    since: str | None = None,
+    until: str | None = None,
+    project: str | None = None,
+    ship: bool = False,
+) -> dict[str, Any]:
+    """Aggregate completed-tasks handoffs into a markdown digest.
+
+    Query params:
+
+    - ``since``  ISO timestamp; default ``now - 24h`` (UTC).
+    - ``until``  ISO timestamp; default ``now`` (UTC).
+    - ``project``  filter by ``task.project_context``.
+    - ``ship``  when true, additionally write the digest body to
+      ``MULTICA_DIGESTS_DIR`` (default ``.agent-context/digests``)
+      with a ``.md`` body + ``.json`` metadata sidecar. The ship
+      itself does NOT POST to Multica -- it produces an
+      operator-reviewable artifact; upload to Multica is left to a
+      separate cron that POSTs the file.
+
+    Response includes the markdown body in ``digest``, the list of
+    contributing task ids in ``task_ids``, and (when ``ship=true``)
+    the absolute path of the written file in ``shipped_to``.
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if until is None:
+        # Default window end is "right now" -- use full ISO precision
+        # so a handoff that just landed (microseconds ago) is in the
+        # window; a user-supplied ?until=2026-07-30T00:24:18Z that
+        # matches this ``now`` second will still match because both
+        # sides parse to the same second when ``Z`` is replaced with
+        # ``+00:00``.
+        until = now.isoformat()
+    if since is None:
+        since = (now - datetime.timedelta(hours=24)).isoformat()
+    items = _collect_digest_items(since, until, project)
+    body = _render_digest_markdown(items, since, until, project)
+    payload: dict[str, Any] = {
+        "since": since,
+        "until": until,
+        "project": project,
+        "count": len(items),
+        "task_ids": [row["task"].task_id for row in items],
+        "digest": body,
+    }
+    if ship:
+        path = _write_digest_file(items, since, until, project, body)
+        payload["shipped_to"] = path
+    return payload
+
+
+@app.get("/digests")
+def list_digests() -> dict[str, Any]:
+    """List digest files previously shipped via ``GET
+    /reviews/digest?ship=true``.
+
+    Each row points at the ``.md`` body; metadata lives in the
+    sibling ``.json``. Sorted by filename (which embeds the
+    ``since_until`` stamp, so chronological by construction).
+    """
+    if not os.path.isdir(DIGESTS_DIR):
+        return {"count": 0, "entries": []}
+    entries: list[dict[str, Any]] = []
+    for name in sorted(os.listdir(DIGESTS_DIR)):
+        if not name.endswith(".md"):
+            continue
+        full = os.path.join(DIGESTS_DIR, name)
+        sidecar = full.removesuffix(".md") + ".json"
+        meta: dict[str, Any] = {}
+        if os.path.exists(sidecar):
+            try:
+                with open(sidecar, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                meta = {"sidecar_broken": True}
+        entries.append({"filename": name, "path": os.path.abspath(full), **meta})
+    return {"count": len(entries), "entries": entries}
 
 
 @app.get("/agents")

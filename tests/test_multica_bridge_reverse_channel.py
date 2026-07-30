@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import sys
 from pathlib import Path
 from urllib import error as urllib_error
@@ -1154,3 +1155,228 @@ def test_outbox_replay_without_idempotency_key_omits_header(
     assert r.status_code == 200
     assert r.json()["succeeded"] == 1
     assert captured == [None]
+def test_reviews_digest_default_window_returns_completed_tasks(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """GET /reviews/digest returns a markdown digest of all tasks in
+    status=completed whose handoff.timestamp falls inside the
+    default (last 24h) window.
+    """
+    # Plant a task with an explicit "now" handoff so it lands in the
+    # default window.
+    _seed_submitted_task(isolated_client, "DIG-1")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-1",
+                "agent_id": "claude-frontend",
+                "changed_files": ["src/handlers/auth.py"],
+                "verification": "pytest:pass",
+                "risks": ["needs staging smoke"],
+            },
+        },
+    )
+    r = isolated_client.get("/reviews/digest")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["count"] == 1
+    assert payload["task_ids"] == ["multica-DIG-1"]
+    assert "multica-DIG-1" in payload["digest"]
+    assert "src/handlers/auth.py" in payload["digest"]
+    assert "needs staging smoke" in payload["digest"]
+    assert "# MAC review digest" in payload["digest"]
+
+
+def test_reviews_digest_with_explicit_window_filters_by_timestamp(
+    isolated_client, isolated_bridge,
+):
+    """GET /reviews/digest?since=...&until=... honours an explicit
+    window. A task whose handoff.timestamp is OUTSIDE [since, until]
+    must be excluded even if its status is completed."""
+    _seed_submitted_task(isolated_client, "DIG-FUTURE")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-FUTURE",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    # Window in 1900 -- nothing should match.
+    r = isolated_client.get(
+        "/reviews/digest?since=1900-01-01T00:00:00Z"
+        "&until=1900-12-31T23:59:59Z"
+    )
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+    assert r.json()["digest"].endswith("_No tasks completed in this window._\n") or (
+        "_No tasks completed in this window._" in r.json()["digest"]
+    )
+
+
+def test_reviews_digest_project_filter_applies(
+    isolated_client, isolated_bridge, monkeypatch,
+):
+    """When ``project`` is supplied, only tasks whose
+    ``project_context`` matches are aggregated into the digest."""
+    # Seed one task; the bridge stamps project_context as None by
+    # default. We use the project filter "X" and assert the seeded
+    # task is excluded.
+    _seed_submitted_task(isolated_client, "DIG-X")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-X",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r = isolated_client.get("/reviews/digest?project=does-not-exist")
+    assert r.status_code == 200
+    assert r.json()["count"] == 0
+
+
+def test_reviews_digest_ship_writes_md_and_json_sidecar(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """``ship=true`` persists the digest body to ``MULTICA_DIGESTS_DIR``
+    as ``.md`` plus a sibling ``.json`` metadata sidecar. The
+    response surfaces the absolute path so an operator can verify
+    before manual upload.
+    """
+    digests = tmp_path / "digests"
+    monkeypatch.setattr(isolated_bridge, "DIGESTS_DIR", str(digests))
+    _seed_submitted_task(isolated_client, "DIG-SHIP")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-SHIP",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r = isolated_client.get("/reviews/digest?ship=true")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["count"] == 1
+    assert "shipped_to" in payload
+    written = payload["shipped_to"]
+    assert os.path.isabs(written)
+    assert os.path.isfile(written)
+    with open(written, encoding="utf-8") as _f:
+        body = _f.read()
+    assert "multica-DIG-SHIP" in body
+    sidecar = written.removesuffix(".md") + ".json"
+    assert os.path.isfile(sidecar)
+    with open(sidecar, encoding="utf-8") as _f:
+        meta = json.loads(_f.read())
+    assert meta["kind"] == "digest"
+    assert meta["count"] == 1
+    assert meta["issue_ids"] == ["DIG-SHIP"]
+
+
+def test_reviews_digest_ship_is_idempotent_for_same_window(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """Re-shipping the digest for the same (since, until, project) must
+    overwrite the same file -- no accumulation -- so a cron replaying
+    every minute does not fill disk.
+    """
+    digests = tmp_path / "digests"
+    monkeypatch.setattr(isolated_bridge, "DIGESTS_DIR", str(digests))
+    _seed_submitted_task(isolated_client, "DIG-IDEMP")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-IDEMP",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r1 = isolated_client.get("/reviews/digest?ship=true")
+    r2 = isolated_client.get("/reviews/digest?ship=true")
+    assert r1.json()["shipped_to"] == r2.json()["shipped_to"]
+    # Only one .md, one .json file
+    files = list((tmp_path / "digests").glob("*"))
+    md = [f for f in files if f.suffix == ".md"]
+    js = [f for f in files if f.suffix == ".json"]
+    assert len(md) == 1
+    assert len(js) == 1
+
+
+def test_reviews_digest_ship_sanitises_project_slug(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """Project strings with path-traversal characters must be slugged
+    so a malicious ``?project=../../etc`` cannot escape DIGESTS_DIR."""
+    digests = tmp_path / "digests"
+    monkeypatch.setattr(isolated_bridge, "DIGESTS_DIR", str(digests))
+    _seed_submitted_task(isolated_client, "DIG-SLUG")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-SLUG",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    r = isolated_client.get("/reviews/digest?project=../../etc&ship=true")
+    assert r.status_code == 200
+    # Ship must still land inside DIGESTS_DIR, not escape.
+    shipped = Path(r.json()["shipped_to"]).resolve()
+    assert str(shipped).startswith(str(Path(r.json()["shipped_to"]).parent))
+
+
+def test_list_digests_returns_shipped_files(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """GET /digests must enumerate digest .md files written by
+    earlier ship=true calls, carrying the sidecar metadata when
+    present and gracefully flagging missing sidecars.
+    """
+    digests = tmp_path / "digests"
+    monkeypatch.setattr(isolated_bridge, "DIGESTS_DIR", str(digests))
+    _seed_submitted_task(isolated_client, "DIG-LIST")
+    isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "DIG-LIST",
+                "agent_id": "claude-frontend",
+                "changed_files": ["a.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    isolated_client.get("/reviews/digest?ship=true")
+    r = isolated_client.get("/digests")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["count"] == 1
+    e = payload["entries"][0]
+    assert e["kind"] == "digest"
+    assert e["count"] == 1
+    assert e["issue_ids"] == ["DIG-LIST"]

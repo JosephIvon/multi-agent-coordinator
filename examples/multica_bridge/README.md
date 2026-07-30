@@ -139,6 +139,38 @@ an `idempotency_key` field; drains on those entries omit the header
 entirely, which keeps forward-compat with on-disk state from previous
 deployments.
 
+#### Cross-window digest
+
+`GET /reviews/digest?since=<iso>&until=<iso>&project=<id>&ship=<bool>`
+aggregates every task in `status="completed"` whose handoff timestamp
+falls inside the window into a single markdown roll-up.
+
+- `since` defaults to `now - 24h`; `until` to `now` (UTC). Both accept
+  the `Z` suffix and full microsecond precision, so a cron replaying
+  every minute will see the same wall-clock second land in the same
+  dedup bucket.
+- `project` filters by `task.project_context`; omit it for an
+  org-wide roll-up.
+- `ship=true` additionally writes the digest body to
+  `MULTICA_DIGESTS_DIR` (default `.agent-context/digests`) as
+  `digest-<project>-<since>_<until>.md` plus a sibling `.json`
+  metadata sidecar. Filenames are second-precision stable so a
+  re-ship for the same window overwrites in place rather than
+  accumulating. `GET /digests` lists previously shipped digests
+  with their metadata so an operator can review before manually
+  uploading to Multica (the bridge does NOT auto-POST the digest
+  file -- the upload channel can be wired separately).
+
+Response (always) carries:
+
+- `count` -- number of contributing tasks
+- `task_ids` -- the Multica-style task ids (no `multica-` prefix)
+- `digest` -- the rendered markdown body
+- `since` / `until` / `project` echoed back so the consumer can
+  confirm the window they queried
+- `shipped_to` -- absolute path to the `.md` (when `ship=true`)
+
+
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/healthz
 ```
