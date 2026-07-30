@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import time
+from collections import OrderedDict
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -27,7 +29,7 @@ from mac.protocol.messages import (
     TaskTransfer,
 )
 from mac.quality.gate import evaluate_quality_gate
-from mac.scoring import ScoringFn, get_scorer
+from mac.scoring import ScoringFn, get_scorer, is_async_scorer, resolve_scorer
 from mac.storage import SQLiteTaskLedger, StatusConflict
 from mac.testing.contracts import TestContract
 
@@ -73,28 +75,43 @@ class Registry:
         event_bus: TaskEventBus | None = None,
         policy: CoordinationPolicy | None = None,
         scoring_fn: ScoringFn | str | None = None,
+        scoring_cache_maxsize: int = 1024,
+        scoring_cache_ttl_seconds: float = 300.0,
     ) -> None:
         self.ledger = ledger
         self.event_bus = event_bus
         # Default to environment-driven policy so existing call sites
         # pick up MAC_REQUIRE_REVIEW / MAC_PATH_RULES without code changes.
         self.policy: CoordinationPolicy = policy or CoordinationPolicy.from_env()
-        # Optional hook that overrides list_ready_tasks default ordering.
-        # Accepts a callable ``fn(task) -> float`` (higher = claim first)
-        # or a string name registered in ``mac.scoring``. ``None`` keeps the
-        # original SQL-natural ordering. See ``mac.scoring`` for details.
-        self._scoring_fn: ScoringFn | None = self._resolve_scoring_fn(scoring_fn)
+        # LRU+TTL cache state for alist_ready_tasks results. The sync
+        # sort key bypasses this cache because it's already sub-ms; the
+        # cache exists to amortise LLM-style scorers. maxsize=0 disables
+        # caching entirely.
+        self._scoring_cache_maxsize: int = max(0, int(scoring_cache_maxsize))
+        self._scoring_cache_ttl: float = max(0.0, float(scoring_cache_ttl_seconds))
+        self._scoring_cache: OrderedDict[str, tuple[float, float]] = OrderedDict()
+        self._scoring_cache_hits: int = 0
+        self._scoring_cache_misses: int = 0
+        # Sync and async scoring hooks live in separate slots so the sync
+        # hot path never has to inspect asyncio state. Exactly one of
+        # _scoring_fn and _async_scoring_fn is non-None after construction.
+        self._scoring_fn: ScoringFn | None = None
+        self._async_scoring_fn = None
+        self._scoring_fn_id: str | None = None  # stable id used as cache-key suffix
+        self.set_scoring_fn(scoring_fn)
 
     @staticmethod
     def _resolve_scoring_fn(
         scoring_fn: ScoringFn | str | None,
     ) -> ScoringFn | None:
-        """Coerce ``scoring_fn`` into a callable or ``None``.
+        """Coerce a sync scoring hook into a callable or ``None``.
 
-        ``None`` keeps the default behaviour. A callable is used directly.
-        A string looks up the named scorer in :mod:`mac.scoring`; unknown
-        names raise :class:`ValueError` so configuration errors surface
-        immediately instead of silently falling back to the default.
+        See :meth:`set_scoring_fn` for the full picture; this only
+        validates and returns the *sync* callable. Async callables are
+        detected upstream and routed to ``_async_scoring_fn`` instead.
+        ``None`` keeps the default behaviour. A callable is returned as
+        is. A string looks up the named scorer in the sync registry;
+        unknown names raise :class:`ValueError`.
         """
         if scoring_fn is None:
             return None
@@ -115,11 +132,61 @@ class Registry:
     def set_scoring_fn(self, scoring_fn: ScoringFn | str | None) -> None:
         """Install or clear the scoring hook at runtime.
 
-        Pass ``None`` (or omit the scorer's name) to revert to the SQL
-        natural ordering used before Round 14. Re-resolving is safe to
-        call repeatedly.
+        Accepts:
+
+        * ``None`` - revert to the SQL natural ordering.
+        * A sync callable ``fn(task) -> float`` - sync ``list_ready_tasks``
+          uses it directly; ``alist_ready_tasks`` runs it via the default
+          executor so the event loop never blocks.
+        * An ``async def`` callable - ``alist_ready_tasks`` awaits it;
+          calling sync ``list_ready_tasks`` afterwards raises
+          :class:`TypeError` so the misuse is caught immediately.
+        * A string name - looks up the sync registry first, then the async
+          registry via :func:`mac.scoring.resolve_scorer`. Unknown names
+          raise :class:`ValueError` so config errors surface immediately.
+
+        Re-resolving clears the scoring cache because stale scores from
+        a previous policy must not leak.
         """
-        self._scoring_fn = self._resolve_scoring_fn(scoring_fn)
+        self._scoring_cache.clear()
+        self._scoring_cache_hits = 0
+        self._scoring_cache_misses = 0
+
+        if scoring_fn is None:
+            self._scoring_fn = None
+            self._async_scoring_fn = None
+            self._scoring_fn_id = None
+            return
+
+        if isinstance(scoring_fn, str):
+            resolved = resolve_scorer(scoring_fn)
+            if resolved is None:
+                raise ValueError(
+                    f"unknown scoring_fn name {scoring_fn!r}; "
+                    f"register it via mac.scoring.register_scorer first"
+                )
+        elif callable(scoring_fn):
+            resolved = scoring_fn
+        else:
+            raise ValueError(
+                f"scoring_fn must be callable, str, or None; got {type(scoring_fn).__name__}"
+            )
+
+        if is_async_scorer(resolved):
+            self._scoring_fn = None
+            self._async_scoring_fn = resolved
+            self._scoring_fn_id = (
+                f"{getattr(resolved, '__qualname__', repr(resolved))}@async"
+            )
+        else:
+            sync = self._resolve_scoring_fn(scoring_fn if isinstance(scoring_fn, str) else resolved)
+            self._scoring_fn = sync
+            self._async_scoring_fn = None
+            self._scoring_fn_id = (
+                f"{getattr(sync, '__qualname__', repr(sync))}@sync"
+                if sync is not None
+                else None
+            )
 
     def register_agent(self, agent: Any) -> None:
         self.ledger.save_agent_card(agent)
@@ -848,6 +915,11 @@ class Registry:
             if not self._dependencies_satisfied(task):
                 continue
             ready.append(task)
+        if self._async_scoring_fn is not None:
+            raise TypeError(
+                "Registry.list_ready_tasks() cannot run an async scorer; "
+                "use Registry.alist_ready_tasks() (or Registry.set_scoring_fn(None))"
+            )
         if self._scoring_fn is not None:
             # Defensive: treat None / NaN returns as 0.0 so a misbehaving
             # scorer can never break sorted() (NaN ordering raises in
@@ -858,6 +930,125 @@ class Registry:
                 reverse=True,
             )
         return ready
+
+    async def alist_ready_tasks(
+        self,
+        *,
+        agent_id=None,
+        capability=None,
+        project_context=None,
+    ):
+        # Async variant of list_ready_tasks (Round 15).
+        # No scorer -> returns SQL natural order without any asyncio work.
+        # Sync scorer -> runs in loop.run_in_executor so the loop is free.
+        # Async scorer -> awaits each invocation via asyncio.gather.
+        # Results are cached in an LRU+TTL cache keyed by task_id so the
+        # second hit on the same task pays no extra inference cost.
+        tasks = self.ledger.list_task_transfers(status='proposed', project_context=project_context)
+        ready = []
+        for task in tasks:
+            if agent_id is not None and task.target_agent_id is not None and task.target_agent_id != agent_id:
+                continue
+            if capability is not None and _required_capability(task) != capability:
+                continue
+            if not self._dependencies_satisfied(task):
+                continue
+            ready.append(task)
+
+        if self._scoring_fn is None and self._async_scoring_fn is None:
+            return ready
+
+        scores = await self._ascore_tasks(ready)
+        return sorted(ready, key=lambda task, _m=scores: _m[task.task_id], reverse=True)
+
+    async def _ascore_tasks(self, tasks):
+        # Compute task_id -> float using the LRU+TTL cache.
+        if not tasks:
+            return {}
+
+        now = time.time()
+        ttl = self._scoring_cache_ttl
+        maxsize = self._scoring_cache_maxsize
+        scorer_id = self._scoring_fn_id or '_default'
+        out = {}
+        misses = []
+
+        for task in tasks:
+            cache_key = f'{scorer_id}::{task.task_id}'
+            cached = self._scoring_cache.get(cache_key)
+            if cached is not None:
+                score, ts = cached
+                if ttl == 0 or (now - ts) <= ttl:
+                    self._scoring_cache.move_to_end(cache_key)
+                    self._scoring_cache_hits += 1
+                    out[task.task_id] = score
+                    continue
+                self._scoring_cache.pop(cache_key, None)
+            misses.append(task)
+
+        if misses:
+            self._scoring_cache_misses += len(misses)
+            if self._async_scoring_fn is not None:
+                raw_scores = await asyncio.gather(
+                    *(self._async_scoring_fn(task) for task in misses),
+                    return_exceptions=True,
+                )
+                inferred = [self._to_async_score(r) for r in raw_scores]
+            else:
+                loop = asyncio.get_running_loop()
+                inferred = await asyncio.gather(
+                    *(loop.run_in_executor(None, self._scoring_fn, task) for task in misses)
+                )
+                inferred = [self._to_async_score(r) for r in inferred]
+
+            for task, score in zip(misses, inferred, strict=True):
+                out[task.task_id] = score
+                if maxsize > 0:
+                    cache_key = f'{scorer_id}::{task.task_id}'
+                    self._scoring_cache[cache_key] = (score, now)
+                    while len(self._scoring_cache) > maxsize:
+                        self._scoring_cache.popitem(last=False)
+
+        return out
+
+    @staticmethod
+    def _to_async_score(raw):
+        # Coerce an awaited scorer return value into a total-order float.
+        if isinstance(raw, BaseException):
+            return 0.0
+        if raw is None:
+            return 0.0
+        try:
+            result = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        if result != result:  # NaN
+            return 0.0
+        return result
+
+    def clear_scoring_cache(self):
+        # Drop all cached scorer results and zero the counters.
+        self._scoring_cache.clear()
+        self._scoring_cache_hits = 0
+        self._scoring_cache_misses = 0
+
+    def scoring_cache_info(self):
+        # Return CacheInfo(hits, misses, maxsize, currsize, ttl_seconds).
+        from typing import NamedTuple
+        class _CacheInfo(NamedTuple):
+            hits: int
+            misses: int
+            maxsize: int
+            currsize: int
+            ttl_seconds: float
+        return _CacheInfo(
+            hits=self._scoring_cache_hits,
+            misses=self._scoring_cache_misses,
+            maxsize=self._scoring_cache_maxsize,
+            currsize=len(self._scoring_cache),
+            ttl_seconds=self._scoring_cache_ttl,
+        )
+
 
     def save_handoff_result(
         self,
