@@ -31,8 +31,20 @@ Reverse channel (MAC -> Multica):
 
     When MULTICA_API_URL is empty the reverse channel is a no-op (dev
     mode). On any 4xx/5xx or network failure the packet is written to
-    REVIEW_FALLBACK_DIR and a warning is logged; the webhook response
-    still returns 200 so Multica does not retry.
+    MULTICA_OUTBOX_DIR (default .agent-context/outbox) as a structured
+    JSON file with kind/path/body/issue_id/attempt metadata, and a
+    warning is logged; the webhook response still returns 200 so
+    Multica does not retry. The outbox can be drained manually via
+    POST /outbox/replay, or you can replay entries from your own cron.
+
+Audit-trail shipping (also MAC -> Multica, but distinct from the review
+    packet):
+    Set MULTICA_AUDIT_TRAIL=true to enable. After every handled webhook
+    the bridge POSTs a short one-line audit comment ("[MAC audit]
+    `<event_type>` @ <ts>") back to the same Multica issue. Failures
+    are logged at WARNING but do NOT write to the outbox -- audit
+    loss is non-critical because the MAC ledger already holds the
+    authoritative record.
 
 Audit-trail shipping (also MAC -> Multica, but distinct from the review
 packet):
@@ -55,6 +67,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -80,6 +93,9 @@ LISTEN_PORT = int(os.environ.get("BRIDGE_PORT", "8765"))
 MULTICA_API_URL = os.environ.get("MULTICA_API_URL", "").rstrip("/")
 MULTICA_API_TOKEN = os.environ.get("MULTICA_API_TOKEN", "")
 REVIEW_FALLBACK_DIR = os.environ.get("REVIEW_FALLBACK_DIR", ".agent-context/review-fallback")
+OUTBOX_DIR = os.environ.get("MULTICA_OUTBOX_DIR", ".agent-context/outbox")
+OUTBOX_MAX_ATTEMPTS = int(os.environ.get("MULTICA_OUTBOX_MAX_ATTEMPTS", "3"))
+OUTBOX_BACKOFF_SECONDS = float(os.environ.get("MULTICA_OUTBOX_BACKOFF_SECONDS", "0.5"))
 GUARDED_PATTERNS = [
     p.strip()
     for p in os.environ.get("MULTICA_GUARDED_PATHS", "").split(",")
@@ -181,39 +197,61 @@ def _format_review_packet(
     return chr(10).join(lines) + chr(10)
 
 
-def _post_json_to_multica(path: str, body: str, timeout: int = 10) -> tuple[bool, int | None, BaseException | None]:
-    """POST a JSON envelope to Multica and report the outcome.
+def _post_json_to_multica(
+    path: str,
+    body: str,
+    timeout: int = 10,
+    *,
+    max_attempts: int | None = None,
+    backoff: float | None = None,
+) -> tuple[bool, int | None, BaseException | None]:
+    """POST a JSON envelope to Multica with bounded exponential retry.
 
-    Centralises the URL build, Bearer-token injection, and timeout that
-    both the review-packet reverse channel and the audit-trail
-    ship-back need. When MULTICA_API_URL is empty the call is a no-op
-    that returns ``(True, None, None)`` so dev environments do not
-    regress.
+    Centralises the URL build, Bearer-token injection, timeout, and
+    retry loop that both the review-packet reverse channel and the
+    audit-trail ship-back need. When MULTICA_API_URL is empty the
+    call is a no-op that returns ``(True, None, None)`` so dev
+    environments do not regress.
+
+    Retries on URLError/HTTPError/TimeoutError/OSError up to
+    ``max_attempts`` times (default ``OUTBOX_MAX_ATTEMPTS``) with
+    exponential backoff starting at ``backoff`` seconds (default
+    ``OUTBOX_BACKOFF_SECONDS``). On a 2xx response the loop returns
+    immediately with the status code.
 
     Returns ``(ok, status_code, exception)`` where ``ok`` is True iff
     Multica returned 2xx. ``status_code`` is the HTTP status on a
     successful response, ``None`` on network failure. ``exception``
     carries the underlying URLError/HTTPError/TimeoutError/OSError on
-    failure, ``None`` otherwise.
+    final failure, ``None`` otherwise.
     """
     if not MULTICA_API_URL:
         return True, None, None
+    if max_attempts is None:
+        max_attempts = OUTBOX_MAX_ATTEMPTS
+    if backoff is None:
+        backoff = OUTBOX_BACKOFF_SECONDS
     url = f"{MULTICA_API_URL}{path}"
     payload = json.dumps({"body": body}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return (200 <= resp.status < 300), resp.status, None
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
-        return False, None, exc
+    last_exc: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        req = urllib.request.Request(
+            url,
+            data=payload,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                **({"Authorization": f"Bearer {MULTICA_API_TOKEN}"} if MULTICA_API_TOKEN else {}),
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return (200 <= resp.status < 300), resp.status, None
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+            last_exc = exc
+            if attempt < max_attempts:
+                time.sleep(backoff * (2 ** (attempt - 1)))
+    return False, None, last_exc
 
 
 def _post_review_to_multica(issue_id: str, body: str) -> bool:
@@ -222,8 +260,8 @@ def _post_review_to_multica(issue_id: str, body: str) -> bool:
     No-op (and returns True) when MULTICA_API_URL is empty, so dev
     environments without a Multica server keep working. Returns True if
     Multica accepted the comment (2xx), False otherwise. On any network
-    failure the body is also written to REVIEW_FALLBACK_DIR so a
-    human or cron can replay it later.
+    failure the body is written to the outbox (MULTICA_OUTBOX_DIR) so a
+    cron job or POST /outbox/replay can drain it later.
     """
     if not MULTICA_API_URL:
         logger.info("reverse channel skipped: MULTICA_API_URL not set")
@@ -235,29 +273,98 @@ def _post_review_to_multica(issue_id: str, body: str) -> bool:
         logger.info("reverse channel: posted review packet for %s (status=%d)", issue_id, status)
         return True
     if exc is not None:
-        logger.warning("reverse channel: failed to post %s (%s); writing fallback", issue_id, exc)
+        logger.warning("reverse channel: failed to post %s (%s); writing outbox entry", issue_id, exc)
     else:
-        logger.warning("reverse channel: non-2xx %d for %s", status, issue_id)
-    _write_review_fallback(issue_id, body)
+        logger.warning("reverse channel: non-2xx %d for %s; writing outbox entry", status, issue_id)
+    _write_outbox_entry(
+        issue_id=issue_id,
+        kind="review",
+        path=f"/api/issues/{issue_id}/comments",
+        body=body,
+    )
     return False
 
 
-def _write_review_fallback(issue_id: str, body: str) -> None:
-    """Persist the review packet to disk so it is not lost on API failure."""
+def _write_outbox_entry(
+    *,
+    issue_id: str,
+    kind: str,
+    path: str,
+    body: str,
+) -> str | None:
+    """Persist a failed outbound Multica POST to the outbox for later replay.
+
+    The file is JSON so a cron job (or the bridge itself via
+    POST /outbox/replay) can re-POST it without losing context. The
+    filename embeds a millisecond timestamp so multiple failures for the
+    same issue_id are kept in arrival order; entries are sorted by
+    timestamp at replay time.
+    """
     try:
-        os.makedirs(REVIEW_FALLBACK_DIR, exist_ok=True)
-        # Stable filename so retries are idempotent at the FS level.
-        path = os.path.join(REVIEW_FALLBACK_DIR, f"{issue_id}.md")
-        # Refuse to overwrite an existing fallback so a previous attempt
-        # is not silently lost; the operator can compare or rotate manually.
-        if os.path.exists(path):
-            logger.info("reverse channel: fallback already exists for %s, skipping", issue_id)
-            return
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(body)
-        logger.info("reverse channel: wrote fallback for %s to %s", issue_id, path)
+        os.makedirs(OUTBOX_DIR, exist_ok=True)
+        ts_ms = int(time.time() * 1000)
+        # Make the issue_id filename-safe (no / or \ in IDs).
+        safe_issue = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(issue_id))
+        filename = f"{ts_ms}-{safe_issue}-{kind}.json"
+        full_path = os.path.join(OUTBOX_DIR, filename)
+        entry = {
+            "kind": kind,
+            "issue_id": str(issue_id),
+            "path": path,
+            "body": body,
+            "first_attempt": ts_ms,
+            "last_attempt": ts_ms,
+            "attempts": 1,
+        }
+        with open(full_path, "w", encoding="utf-8") as f:
+            json.dump(entry, f, ensure_ascii=False)
+        logger.warning(
+            "outbox: wrote %s/%s for issue=%s after failed POST", OUTBOX_DIR, filename, issue_id,
+        )
+        return full_path
     except OSError as exc:
-        logger.error("reverse channel: could not write fallback for %s: %s", issue_id, exc)
+        logger.error("outbox: could not write entry for %s: %s", issue_id, exc)
+        return None
+
+
+def _drain_outbox() -> dict[str, Any]:
+    """Replay every outbox entry against Multica and delete the file
+    on success. Best-effort: failures are left in the outbox for the
+    next attempt.
+    """
+    if not MULTICA_API_URL:
+        return {"replayed": 0, "succeeded": 0, "failed": 0, "skipped": True}
+    if not os.path.isdir(OUTBOX_DIR):
+        return {"replayed": 0, "succeeded": 0, "failed": 0, "skipped": True}
+    replayed = succeeded = failed = 0
+    for name in sorted(os.listdir(OUTBOX_DIR)):
+        if not name.endswith(".json"):
+            continue
+        full_path = os.path.join(OUTBOX_DIR, name)
+        try:
+            with open(full_path, encoding="utf-8") as f:
+                entry = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("outbox: skipping unreadable entry %s (%s)", name, exc)
+            continue
+        ok, status, exc = _post_json_to_multica(
+            entry["path"], entry["body"], timeout=10,
+        )
+        replayed += 1
+        if ok:
+            try:
+                os.remove(full_path)
+                succeeded += 1
+                logger.info("outbox: drained %s for issue=%s", name, entry.get("issue_id"))
+            except OSError as e:
+                logger.warning("outbox: drained %s but could not remove file: %s", name, e)
+        else:
+            failed += 1
+            logger.warning(
+                "outbox: %s for issue=%s still failing (status=%s exc=%s)",
+                name, entry.get("issue_id"), status, exc,
+            )
+    return {"replayed": replayed, "succeeded": succeeded, "failed": failed, "skipped": False}
 
 
 def _summarize_handler_result(result: dict[str, Any] | None) -> str:
@@ -543,6 +650,47 @@ async def multica_webhook(request: Request) -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/outbox")
+def list_outbox() -> dict[str, Any]:
+    """List pending outbox entries (failed Multica POSTs awaiting replay).
+
+    Cheap directory listing; the body of each entry is NOT returned --
+    callers should use POST /outbox/replay to actually attempt
+    delivery.
+    """
+    if not os.path.isdir(OUTBOX_DIR):
+        return {"count": 0, "entries": []}
+    entries = []
+    for name in sorted(os.listdir(OUTBOX_DIR)):
+        if not name.endswith(".json"):
+            continue
+        full_path = os.path.join(OUTBOX_DIR, name)
+        try:
+            with open(full_path, encoding="utf-8") as f:
+                entry = json.load(f)
+            entries.append({
+                "filename": name,
+                "kind": entry.get("kind"),
+                "issue_id": entry.get("issue_id"),
+                "first_attempt": entry.get("first_attempt"),
+                "last_attempt": entry.get("last_attempt"),
+                "attempts": entry.get("attempts"),
+            })
+        except (OSError, json.JSONDecodeError):
+            entries.append({"filename": name, "broken": True})
+    return {"count": len(entries), "entries": entries}
+
+
+@app.post("/outbox/replay")
+def replay_outbox() -> dict[str, Any]:
+    """Replay every outbox entry against Multica. Successful replays
+    delete their file; failures are kept for the next call. Safe to
+    call repeatedly -- it is idempotent against the current outbox
+    snapshot.
+    """
+    return _drain_outbox()
 
 
 @app.get("/agents")

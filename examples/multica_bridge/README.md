@@ -97,14 +97,27 @@ The packet mirrors what `mac-agent review-packet` would print.
 ```
 MULTICA_API_URL=http://10.47.102.70:8081
 MULTICA_API_TOKEN=optional-bearer-token
-REVIEW_FALLBACK_DIR=.agent-context/review-fallback   # where to write
-                                                        # on POST failure
+REVIEW_FALLBACK_DIR=.agent-context/review-fallback   # (legacy, deprecated)
+MULTICA_OUTBOX_DIR=.agent-context/outbox             # structured JSON for
+                                                       # failed POSTs; drained
+                                                       # via POST /outbox/replay
+MULTICA_OUTBOX_MAX_ATTEMPTS=3                         # in-process retry budget
+MULTICA_OUTBOX_BACKOFF_SECONDS=0.5                    # initial backoff (doubles)
 ```
 
 When `MULTICA_API_URL` is empty the reverse channel is a no-op (dev mode).
-On any 4xx/5xx or network failure the packet is written to
-`REVIEW_FALLBACK_DIR` and a warning is logged; the webhook response
-still returns 200 so Multica does not retry the whole webhook.
+On any 4xx/5xx or network failure the packet is persisted to the
+structured outbox at `MULTICA_OUTBOX_DIR` (default
+`.agent-context/outbox`) as JSON, the webhook response still returns
+200 so Multica does not retry, and the operator can drain the
+outbox with `POST /outbox/replay` (or your own cron). Each outbound
+POST is retried in-process up to `MULTICA_OUTBOX_MAX_ATTEMPTS` times
+with exponential backoff starting at `MULTICA_OUTBOX_BACKOFF_SECONDS`,
+so transient network blips are absorbed without ever touching disk.
+
+`REVIEW_FALLBACK_DIR` is still honoured as a deprecated alias for
+`MULTICA_OUTBOX_DIR` for backward compatibility, but new
+deployments should set `MULTICA_OUTBOX_DIR` explicitly.
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/healthz

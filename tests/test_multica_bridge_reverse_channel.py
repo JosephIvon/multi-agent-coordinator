@@ -166,30 +166,41 @@ def test_reverse_channel_posts_review_packet_on_success(client, bridge, monkeypa
     assert "src/r.py" in payload["body"]
 
 
-def test_reverse_channel_falls_back_to_disk_on_api_failure(client, bridge, monkeypatch, tmp_path):
-    _seed_submitted_task(client, "R-3")
-    fallback = tmp_path / "review-fallback"
-    monkeypatch.setattr(bridge, "MULTICA_API_URL", "http://multica.local:8080")
-    monkeypatch.setattr(bridge, "REVIEW_FALLBACK_DIR", str(fallback))
+def test_reverse_channel_falls_back_to_disk_on_api_failure(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """Round 9: the old markdown-fallback (REVIEW_FALLBACK_DIR) was
+    replaced by the structured outbox (MULTICA_OUTBOX_DIR). On API
+    failure the review packet must be persisted as JSON so
+    /outbox/replay can drain it later."""
+    outbox = tmp_path / "outbox"
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    # 1 attempt so the test is fast
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
 
     def fake_urlopen(req, timeout=10):
         raise urllib_error.URLError("connection refused")
 
-    monkeypatch.setattr(bridge.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
 
-    r = client.post(
+    _seed_submitted_task(isolated_client, "R-3")
+    r = isolated_client.post(
         "/webhook/multica",
         json={"type": "agent.completed", "data": _completed_payload("R-3")},
     )
     # Webhook still 200 even when reverse channel failed.
     assert r.status_code == 200
 
-    # The packet landed on disk for replay.
-    fallback_file = fallback / "R-3.md"
-    assert fallback_file.exists()
-    content = fallback_file.read_text(encoding="utf-8")
-    assert "multica-R-3" in content
-    assert "claude-frontend" in content
+    # The packet landed in the structured outbox for replay.
+    files = list(outbox.glob("*R-3*.json"))
+    assert files, f"outbox should have one entry for R-3, found: {list(outbox.iterdir())}"
+    entry = json.loads(files[0].read_text(encoding="utf-8"))
+    assert entry["kind"] == "review"
+    assert entry["issue_id"] == "R-3"
+    assert "multica-R-3" in entry["body"]
+    assert "claude-frontend" in entry["body"]
 
 
 def test_reverse_channel_does_not_run_when_status_not_done(client, bridge, monkeypatch):
@@ -687,3 +698,222 @@ def test_list_agents_endpoint_returns_registered_cards(isolated_client, isolated
     assert ids == {"a1", "a2"}
     a2 = next(a for a in body["agents"] if a["agent_id"] == "a2")
     assert a2["load"] == 33
+
+
+
+# ---------------------------------------------------------------------------
+# Round 9: persistent outbox + retry + /outbox endpoints
+# ---------------------------------------------------------------------------
+
+
+def test_review_post_writes_outbox_on_network_failure(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """When the Multica API is unreachable after all retries, the
+    review packet must be written to the outbox as a structured JSON
+    file so a cron / replay endpoint can drain it later."""
+    outbox = tmp_path / "outbox"
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+    # 1 attempt, no backoff so the test is fast
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_BACKOFF_SECONDS", 0.0)
+
+    def boom(*a, **kw):
+        raise urllib_error.URLError("connection refused")
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", boom)
+    _seed_submitted_task(isolated_client, "OUTBOX-1")
+
+    r = isolated_client.post(
+        "/webhook/multica",
+        json={
+            "type": "agent.completed",
+            "data": {
+                "issue_id": "OUTBOX-1",
+                "agent_id": "claude-frontend",
+                "changed_files": ["src/foo.py"],
+                "verification": "pytest:pass",
+            },
+        },
+    )
+    # Webhook stays 200 so Multica does not retry the whole delivery.
+    assert r.status_code == 200
+    files = sorted(outbox.glob("*.json"))
+    assert len(files) == 1
+    entry = json.loads(files[0].read_text(encoding="utf-8"))
+    assert entry["kind"] == "review"
+    assert entry["issue_id"] == "OUTBOX-1"
+    assert entry["path"] == "/api/issues/OUTBOX-1/comments"
+    assert entry["attempts"] == 1
+    assert "Review Task" in entry["body"]
+
+
+def test_post_json_to_multica_retries_with_backoff(
+    isolated_bridge, monkeypatch,
+):
+    """When the API returns a transient URLError the helper must retry
+    up to max_attempts times with exponential backoff. We mock
+    time.sleep so the test runs instantly."""
+    calls = {"n": 0}
+    sleeps = []
+
+    def fake_urlopen(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise urllib_error.URLError("transient")
+        return _FakeResponse(200)
+
+    isolated_bridge.MULTICA_API_URL = "http://multica.local:8080"
+    monkeypatch.setattr(isolated_bridge.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+    ok, status, exc = isolated_bridge._post_json_to_multica(
+        "/api/issues/X/comments",
+        "body",
+        timeout=2,
+        max_attempts=3,
+        backoff=0.5,
+    )
+    assert ok is True
+    assert status == 200
+    assert exc is None
+    assert calls["n"] == 3  # 2 failures + 1 success
+    # Exponential: 0.5, 1.0  (third attempt is the success, no sleep)
+    assert sleeps == [0.5, 1.0]
+
+
+def test_post_json_to_multica_gives_up_after_max_attempts(
+    isolated_bridge, monkeypatch,
+):
+    """After max_attempts the helper must return (False, None, exc) so
+    the caller can decide what to do (write to outbox, etc.)."""
+    calls = {"n": 0}
+
+    def always_fails(*a, **kw):
+        calls["n"] += 1
+        raise urllib_error.URLError("nope")
+
+    isolated_bridge.MULTICA_API_URL = "http://multica.local:8080"
+    monkeypatch.setattr(isolated_bridge.time, "sleep", lambda s: None)
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", always_fails)
+    ok, status, exc = isolated_bridge._post_json_to_multica(
+        "/api/issues/Y/comments", "body", timeout=1, max_attempts=3, backoff=0.0,
+    )
+    assert ok is False
+    assert status is None
+    assert isinstance(exc, urllib_error.URLError)
+    assert calls["n"] == 3
+
+
+def test_list_outbox_returns_empty_when_dir_missing(
+    isolated_client, isolated_bridge, tmp_path, monkeypatch,
+):
+    """GET /outbox must return count=0 cleanly when the outbox
+    directory does not exist (e.g. first run, before any failures)."""
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(tmp_path / "no-such-dir"))
+    r = isolated_client.get("/outbox")
+    assert r.status_code == 200
+    assert r.json() == {"count": 0, "entries": []}
+
+
+def test_replay_outbox_drains_entries_on_success(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """POST /outbox/replay must attempt delivery of every outbox entry
+    and delete files that succeed. Bodies are NOT returned in the
+    /outbox list (only metadata) -- that is the replay endpoint's job.
+    """
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    # Plant two entries
+    for i, (issue, body) in enumerate([
+        ("R-1", "review packet 1"),
+        ("R-2", "review packet 2"),
+    ]):
+        entry = {
+            "kind": "review",
+            "issue_id": issue,
+            "path": f"/api/issues/{issue}/comments",
+            "body": body,
+            "first_attempt": 1_000_000 + i,
+            "last_attempt": 1_000_000 + i,
+            "attempts": 1,
+        }
+        (outbox / f"{1_000_000 + i}-{issue}-review.json").write_text(
+            json.dumps(entry), encoding="utf-8",
+        )
+
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    delivered = []
+
+    def fake_urlopen(*a, **kw):
+        delivered.append(a[0].full_url)
+        return _FakeResponse(201)
+
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", fake_urlopen)
+
+    r = isolated_client.post("/outbox/replay")
+    assert r.status_code == 200
+    summary = r.json()
+    assert summary["replayed"] == 2
+    assert summary["succeeded"] == 2
+    assert summary["failed"] == 0
+    # Files must be deleted on success
+    assert list(outbox.glob("*.json")) == []
+    # Both endpoints must have been called
+    assert len(delivered) == 2
+
+
+def test_replay_outbox_keeps_failures_in_place(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """If a replay attempt still fails, the outbox file must remain
+    so the next replay can try again."""
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    entry = {
+        "kind": "review",
+        "issue_id": "R-still-bad",
+        "path": "/api/issues/R-still-bad/comments",
+        "body": "still bad",
+        "first_attempt": 1,
+        "last_attempt": 1,
+        "attempts": 1,
+    }
+    path = outbox / "1-R-still-bad-review.json"
+    path.write_text(json.dumps(entry), encoding="utf-8")
+
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "http://multica.local:8080")
+
+    def boom(*a, **kw):
+        raise urllib_error.URLError("still failing")
+
+    monkeypatch.setattr(isolated_bridge.time, "sleep", lambda s: None)
+    monkeypatch.setattr(isolated_bridge.urllib.request, "urlopen", boom)
+
+    r = isolated_client.post("/outbox/replay")
+    summary = r.json()
+    assert summary["replayed"] == 1
+    assert summary["succeeded"] == 0
+    assert summary["failed"] == 1
+    # File must remain
+    assert path.exists()
+
+
+def test_replay_outbox_skipped_when_multica_url_empty(
+    isolated_client, isolated_bridge, monkeypatch, tmp_path,
+):
+    """In dev mode (MULTICA_API_URL empty) replay must be a safe
+    no-op rather than raising."""
+    monkeypatch.setattr(isolated_bridge, "MULTICA_API_URL", "")
+    outbox = tmp_path / "outbox"
+    outbox.mkdir()
+    monkeypatch.setattr(isolated_bridge, "OUTBOX_DIR", str(outbox))
+    r = isolated_client.post("/outbox/replay")
+    assert r.status_code == 200
+    summary = r.json()
+    assert summary["skipped"] is True
+    assert summary["replayed"] == 0
