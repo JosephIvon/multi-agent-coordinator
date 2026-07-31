@@ -1,18 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import time
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Request,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel
 
+from mac import __version__
 from mac.adapters.http import GenericHttpAdapter
 from mac.adapters.lifecycle import SessionState, utc_now
+from mac.extensions import (
+    get_channels,
+    list_extensions,
+    subscribe_to_channel,
+)
 from mac.metrics import compute_metrics
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import (
@@ -139,7 +154,7 @@ class CleanupTasksRequest(BaseModel):
 
 
 def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
-    app = FastAPI(title="Multi-Agent Coordinator", version="1.0.0")
+    app = FastAPI(title="Multi-Agent Coordinator", version=__version__)
     expected_token = token if token is not None else os.getenv("MAC_HTTP_TOKEN")
 
     if expected_token:
@@ -589,6 +604,97 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
     @app.get("/metrics")
     def get_metrics() -> dict[str, Any]:
         return compute_metrics(registry.ledger)
+
+    @app.get("/extensions")
+    def extension_catalog() -> dict[str, Any]:
+        return {
+            "extensions": [
+                {
+                    "name": extension.name,
+                    "version": extension.version,
+                    "channels": [
+                        {"name": channel.name, "description": channel.description}
+                        for channel in extension.ws_channels
+                    ],
+                }
+                for extension in list_extensions()
+            ]
+        }
+
+    def extension_ws_handler(
+        channel_name: str,
+    ) -> Any:
+        async def handle(websocket: WebSocket) -> None:
+            if expected_token:
+                authorization = websocket.headers.get("Authorization")
+                query_token = websocket.query_params.get("token")
+                query_authorization = (
+                    f"Bearer {query_token}" if query_token is not None else None
+                )
+                if not (
+                    token_matches(expected_token, authorization)
+                    or token_matches(expected_token, query_authorization)
+                ):
+                    await websocket.close(code=4401)
+                    return
+
+            subscription = subscribe_to_channel(channel_name, maxsize=256)
+            await websocket.accept()
+            try:
+                await websocket.send_json(
+                    {"type": "ready", "channel": channel_name}
+                )
+                while True:
+                    receive_task = asyncio.create_task(websocket.receive_json())
+                    event_task = asyncio.create_task(subscription.wait())
+                    done, pending = await asyncio.wait(
+                        {receive_task, event_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                    for task in pending:
+                        with suppress(asyncio.CancelledError):
+                            await task
+
+                    if receive_task in done:
+                        message = receive_task.result()
+                        if message.get("type") == "ping":
+                            await websocket.send_json(
+                                {"type": "pong", "channel": channel_name}
+                            )
+                        else:
+                            await websocket.send_json(
+                                {
+                                    "type": "error",
+                                    "detail": "unsupported client message",
+                                }
+                            )
+
+                    if event_task in done:
+                        event = event_task.result()
+                        if event is None:
+                            return
+                        await websocket.send_json(
+                            {
+                                "type": "event",
+                                "channel": channel_name,
+                                "payload": event["payload"],
+                            }
+                        )
+            except WebSocketDisconnect:
+                return
+            finally:
+                subscription.unsubscribe()
+
+        return handle
+
+    for channel_name in get_channels():
+        app.add_api_websocket_route(
+            f"/ws/{channel_name}",
+            extension_ws_handler(channel_name),
+            name=f"extension_ws_{channel_name}",
+        )
 
     return app
 

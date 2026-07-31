@@ -645,6 +645,13 @@ class SQLiteTaskLedger:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_conflicts_plan ON conflict_records(plan_id, resolved, updated_at)"
             )
+            # Downstream packages register idempotent DDL through the
+            # public mac.extensions API. The surrounding connection
+            # context owns the transaction and commits all schema work
+            # together when initialization succeeds.
+            from mac.extensions import apply_ddl
+
+            apply_ddl(conn)
 
     def record_quality_result(self, task_id: str, result: dict[str, Any]) -> None:
         data = dict(result)

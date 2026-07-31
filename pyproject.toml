@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mac-agent"
-version = "1.0.0"
+version = "1.1.0"
 description = "A lightweight multi-agent coordination ledger for task handoff, context handoff, and quality gates."
 readme = "README.md"
 requires-python = ">=3.10"

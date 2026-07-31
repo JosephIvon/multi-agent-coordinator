@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 1.0.0 | **License:** MIT
+**Version:** 1.1.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -378,7 +378,7 @@ This keeps one MAC source of truth while allowing new IDE integrations to be add
 ## Production delivery: HTTP, sessions, and IDE bootstrap
 
 ```bash
-pip install "mac-agent[http,mcp]==1.0.0"
+pip install "mac-agent[http,mcp]==1.1.0"
 mac-agent bootstrap --project-root .
 mac-http-server
 ```

@@ -9,7 +9,7 @@
 ## Install
 
 ```bash
-python -m pip install "mac-agent[http,mcp]==1.0.0"
+python -m pip install "mac-agent[http,mcp]==1.1.0"
 mac-agent --help
 mac-mcp-server --help
 ```

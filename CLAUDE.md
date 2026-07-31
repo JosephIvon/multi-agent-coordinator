@@ -8,7 +8,7 @@
 ## 0. 项目速查
 
 - **定位**:轻量多智能体**协作账本**,不是执行引擎
-- **版本**:1.0.0 | **Python**:≥ 3.10 | **License**:MIT
+- **版本**:1.1.0 | **Python**:≥ 3.10 | **License**:MIT
 - **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
 - **状态机**:`proposed → accepted → running → completed`(另含 `review_ready` / `rejected` / `failed` / `cancelled` / `superseded`;`review_ready` 仅 `require_review=True` 时启用)
@@ -22,6 +22,8 @@
 src/mac/
 ├── protocol/messages.py   # 协议权威(Pydantic 模型)
 ├── storage/sqlite.py       # SQLite WAL ledger
+├── extensions.py           # 下游 DDL / hook / WebSocket 扩展注册
+├── schema_extensions.py    # 下游 SQLite schema 函数式 facade
 ├── registry.py             # 业务逻辑入口
 ├── quality/gate.py         # 质量门
 ├── runner/                 # 本地 adapter(命令/Pytest 模板)

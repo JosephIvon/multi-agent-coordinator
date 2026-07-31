@@ -367,6 +367,18 @@ SQLite WAL mode is enabled. Phase A is intended for a local single-workspace set
 
 The `audit_entries` table has a `trace_id` column (default empty) with index `idx_audit_trace(trace_id, created_at)`. Pre-existing databases are auto-migrated: the column is added and `trace_id` is backfilled from the payload JSON for rows written before the column existed.
 
+### 7.1 Downstream schema extensions
+
+Downstream packages may register idempotent SQLite DDL through
+`mac.extensions.Extension.table_ddl` or the function-style
+`mac.schema_extensions.register_table()` facade. `SQLiteTaskLedger`
+applies registered DDL in its initialization transaction after the
+core tables. `mac.schema_extensions.connection()` opens the database
+selected by `MAC_DB_PATH`, applies registered extension DDL, commits
+that schema setup, and returns the live connection to its caller.
+
+`mac.extensions.apply_ddl()` never commits the caller's transaction.
+
 ---
 
 ## 8. Trace Metrics
@@ -445,6 +457,19 @@ Review tools are only effective when `CoordinationPolicy.require_review=True`. `
 |-----|-------------|
 | `mac://capabilities` | Agents grouped by capability name |
 | `mac://health` | Health summary: `last_updated`, `open_tasks`, `inflight_agents` |
+
+### Extension HTTP and WebSocket surface
+
+`GET /extensions` lists registered extensions and their declared
+channels. Each channel is mounted at `/ws/{channel}` when the HTTP
+application is created. The server sends `ready` and `event` JSON
+frames and answers client `ping` frames with `pong`.
+
+Channel payloads are validated with the registered Pydantic model.
+Unknown channels fail instead of falling back to an unvalidated
+stream. When `MAC_HTTP_TOKEN` is configured, WebSocket clients must
+provide the bearer token through the `Authorization` header or the
+`token` query parameter.
 
 ---
 

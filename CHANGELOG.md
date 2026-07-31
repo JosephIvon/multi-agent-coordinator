@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.1.0] - 2026-07-31
+
+### Added
+
+- **`mac.extensions` module** — the new public extension API for downstream packages. Lets a third-party package register extra table DDL, named hooks, and WebSocket channels with mac-agent at import time, without subclassing or forking. See `docs/extensions.md` for the contract and an end-to-end example.
+- **`GET /extensions` route on `mac-http-server`** — lists every registered extension and the channels it declared. Useful for ops dashboards and for downstream packages debugging their own registration.
+- **`/ws/{channel}` routes on `mac-http-server`** — one route per registered `ChannelDef`. The endpoint accepts a client, sends a `ready` frame, then forwards every event published via `mac.extensions.publish_to_channel` to the connected client until disconnect.
+- **Schema and WebSocket extension tests** — cover registry behavior,
+  transaction ownership, ledger initialization, validated channel
+  pub-sub, authentication, introspection, and real WebSocket frames.
+
+### Notes
+
+- The extension registry is process-local and thread-safe. It is NOT multiprocessing-safe by design: mac-agent runs in a single process per host.
+- `apply_ddl()` preserves the caller's transaction boundary;
+  `mac.schema_extensions.connection()` commits only its own schema setup.
+- The new module is fully backward-compatible: no existing mac-agent API changed; no existing test was modified.
+
+
 All notable changes to this project will be documented in this file.
 
 The format is based on Keep a Changelog, and this project follows Semantic Versioning.
