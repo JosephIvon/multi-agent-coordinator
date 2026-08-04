@@ -16,6 +16,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mac-agent")
     parser.add_argument("--verbose", action="store_true", help="Show debug-level output")
     parser.add_argument("--quiet", action="store_true", help="Suppress non-error output")
+    parser.add_argument("--db", default=_cli_db_arg(), help="Path to the SQLite ledger file (overrides MAC_DB_PATH env var and the mac.db default). Use this BEFORE the subcommand if you prefer flag order.")
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     adapter = subcommands.add_parser("adapter", help="Discover and inspect IDE adapters")
