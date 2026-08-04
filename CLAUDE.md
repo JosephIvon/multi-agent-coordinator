@@ -150,6 +150,10 @@ mac-mcp-server
 # 或 module 方式
 python -m mac.mcp_server
 
+# 指定数据库 (MCP server 和 CLI 都读 MAC_DB_PATH env var)
+MAC_DB_PATH=/path/to/mac.db mac-mcp-server
+MAC_DB_PATH=/path/to/mac.db mac-agent tasks
+
 # 或 Claude Code 配置
 # claude mcp add mac -- mac-mcp-server
 ```

@@ -11,6 +11,15 @@ All MCP-capable tools launch:
 {"command": "mac-mcp-server", "args": [], "env": {"MAC_DB_PATH": "mac.db"}}
 ```
 
+The MCP server reads `MAC_DB_PATH` from its environment (falling back to
+`mac.db` in the process working directory).  The CLI honours the same
+variable as a default for ``--db``.  When two tools must share a ledger,
+point them at the same absolute path:
+
+```json
+{"command": "mac-mcp-server", "args": [], "env": {"MAC_DB_PATH": "C:\\shared\\mac.db"}}
+```
+
 | Tool | Generated entry | Purpose |
 |---|---|---|
 | Codex | `AGENTS.md` | Project instructions pointing to MAC |

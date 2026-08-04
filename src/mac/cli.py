@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,7 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
     adapter_inspect.add_argument("adapter_id")
     adapter_run = adapter_subcommands.add_parser("run", help="Run a task through a CLI adapter and sync its result")
     adapter_run.add_argument("adapter_id", choices=["generic-cli"])
-    adapter_run.add_argument("--db", default="mac.db")
+    adapter_run.add_argument("--db", default=_cli_db_arg())
     adapter_run.add_argument("--task-id", required=True)
     adapter_run.add_argument("--agent-id", required=True)
     adapter_run.add_argument("--command", dest="adapter_command_line", nargs=argparse.REMAINDER, required=True)
@@ -35,14 +36,14 @@ def _build_parser() -> argparse.ArgumentParser:
     adapter_run.add_argument("--quality-evidence", action="append", default=[])
 
     context = subcommands.add_parser("context", help="Materialize a portable task context for an adapter")
-    context.add_argument("--db", default="mac.db")
+    context.add_argument("--db", default=_cli_db_arg())
     context.add_argument("--task-id", required=True)
     context.add_argument("--agent-id")
     context.add_argument("--adapter", dest="adapter_id", default="generic-context")
     context.add_argument("--output-dir", default=".agent-context")
 
     bootstrap = subcommands.add_parser("bootstrap", help="Create tool-neutral project context files")
-    bootstrap.add_argument("--db", default="mac.db")
+    bootstrap.add_argument("--db", default=_cli_db_arg())
     bootstrap.add_argument("--task-id")
     bootstrap.add_argument("--agent-id")
     bootstrap.add_argument("--adapter", dest="adapter_id", default="generic-context")
@@ -54,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     contract.add_argument("--custom-evidence", action="append", default=[], help="Override default evidence names (repeatable)")
 
     register = subcommands.add_parser("register", help="Register an agent in the local ledger")
-    register.add_argument("--db", default="mac.db")
+    register.add_argument("--db", default=_cli_db_arg())
     register.add_argument("--agent-id", required=True)
     register.add_argument("--name", required=True)
     register.add_argument("--capability", action="append", required=True)
@@ -64,12 +65,12 @@ def _build_parser() -> argparse.ArgumentParser:
     register.add_argument("--forbidden-path", action="append", default=[])
 
     discover = subcommands.add_parser("discover", help="Discover agents by capability")
-    discover.add_argument("--db", default="mac.db")
+    discover.add_argument("--db", default=_cli_db_arg())
     discover.add_argument("--capability", required=True)
     discover.add_argument("--project-context")
 
     submit = subcommands.add_parser("submit", help="Submit a task to the local ledger")
-    submit.add_argument("--db", default="mac.db")
+    submit.add_argument("--db", default=_cli_db_arg())
     submit.add_argument("--task-id", required=True)
     submit.add_argument("--trace-id")
     submit.add_argument("--source-agent-id", required=True)
@@ -87,49 +88,49 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--spec-json", help="Structured spec as JSON string (stored in task.metadata.spec)")
 
     status = subcommands.add_parser("status", help="Print task status")
-    status.add_argument("--db", default="mac.db")
+    status.add_argument("--db", default=_cli_db_arg())
     status.add_argument("--task-id", required=True)
 
     tasks = subcommands.add_parser("tasks", help="List tasks from the local ledger")
-    tasks.add_argument("--db", default="mac.db")
+    tasks.add_argument("--db", default=_cli_db_arg())
     tasks.add_argument("--status")
     tasks.add_argument("--capability")
     tasks.add_argument("--agent-id")
     tasks.add_argument("--project-context")
 
     plan = subcommands.add_parser("plan", help="Manage collaboration plans (bare = list)")
-    plan.add_argument("--db", default="mac.db")
+    plan.add_argument("--db", default=_cli_db_arg())
     plan.add_argument("--status", default=None)
     plan_subcommands = plan.add_subparsers(dest="plan_command")
     plan.set_defaults(plan_command="list", db="mac.db", status=None)
     plan_create = plan_subcommands.add_parser("create", help="Create a collaboration plan")
-    plan_create.add_argument("--db", default="mac.db")
+    plan_create.add_argument("--db", default=_cli_db_arg())
     plan_create.add_argument("--plan-id")
     plan_create.add_argument("--goal", required=True)
     plan_create.add_argument("--created-by", default="")
     plan_activate = plan_subcommands.add_parser("activate", help="Activate a collaboration plan")
-    plan_activate.add_argument("--db", default="mac.db")
+    plan_activate.add_argument("--db", default=_cli_db_arg())
     plan_activate.add_argument("--plan-id", required=True)
     plan_close = plan_subcommands.add_parser("close", help="Close a collaboration plan")
-    plan_close.add_argument("--db", default="mac.db")
+    plan_close.add_argument("--db", default=_cli_db_arg())
     plan_close.add_argument("--plan-id", required=True)
     plan_close.add_argument("--status", choices=["completed", "cancelled"], default="completed")
     plan_list = plan_subcommands.add_parser("list", help="List collaboration plans")
-    plan_list.add_argument("--db", default="mac.db")
+    plan_list.add_argument("--db", default=_cli_db_arg())
     plan_list.add_argument("--status")
 
     ready_tasks = subcommands.add_parser("ready-tasks", help="List dependency-unblocked proposed tasks")
-    ready_tasks.add_argument("--db", default="mac.db")
+    ready_tasks.add_argument("--db", default=_cli_db_arg())
     ready_tasks.add_argument("--agent-id")
     ready_tasks.add_argument("--capability")
     ready_tasks.add_argument("--project-context")
 
     metrics = subcommands.add_parser("metrics", help="Show collaboration trace metrics")
-    metrics.add_argument("--db", default="mac.db")
+    metrics.add_argument("--db", default=_cli_db_arg())
     metrics.add_argument("--json", action="store_true", help="Emit metrics as JSON")
 
     handoff = subcommands.add_parser("handoff", help="Save or print a structured task handoff")
-    handoff.add_argument("--db", default="mac.db")
+    handoff.add_argument("--db", default=_cli_db_arg())
     handoff.add_argument("--task-id", required=True)
     handoff.add_argument("--agent-id")
     handoff.add_argument("--plan-id")
@@ -139,7 +140,7 @@ def _build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("--risk", action="append", default=[])
 
     record_conflict = subcommands.add_parser("record-conflict", help="Record a collaboration conflict")
-    record_conflict.add_argument("--db", default="mac.db")
+    record_conflict.add_argument("--db", default=_cli_db_arg())
     record_conflict.add_argument("--conflict-id")
     record_conflict.add_argument("--plan-id")
     record_conflict.add_argument("--task-id")
@@ -152,61 +153,61 @@ def _build_parser() -> argparse.ArgumentParser:
     record_conflict.add_argument("--file", action="append", default=[])
 
     conflicts = subcommands.add_parser("conflicts", help="List collaboration conflicts")
-    conflicts.add_argument("--db", default="mac.db")
+    conflicts.add_argument("--db", default=_cli_db_arg())
     conflicts.add_argument("--plan-id")
     conflicts.add_argument("--resolved", action="store_true")
     conflicts.add_argument("--unresolved", action="store_true")
 
     resolve_conflict = subcommands.add_parser("resolve-conflict", help="Resolve a collaboration conflict")
-    resolve_conflict.add_argument("--db", default="mac.db")
+    resolve_conflict.add_argument("--db", default=_cli_db_arg())
     resolve_conflict.add_argument("--conflict-id", required=True)
     resolve_conflict.add_argument("--resolution", required=True)
 
     worker_packet = subcommands.add_parser("worker-packet", help="Print a worker task packet")
-    worker_packet.add_argument("--db", default="mac.db")
+    worker_packet.add_argument("--db", default=_cli_db_arg())
     worker_packet.add_argument("--task-id", required=True)
     worker_packet.add_argument("--agent-id")
 
     review_packet = subcommands.add_parser("review-packet", help="Print a review task packet")
-    review_packet.add_argument("--db", default="mac.db")
+    review_packet.add_argument("--db", default=_cli_db_arg())
     review_packet.add_argument("--task-id", required=True)
 
     task_evidence = subcommands.add_parser("task-evidence", help="Print a task evidence bundle")
-    task_evidence.add_argument("--db", default="mac.db")
+    task_evidence.add_argument("--db", default=_cli_db_arg())
     task_evidence.add_argument("--task-id", required=True)
 
     quality_preview = subcommands.add_parser("quality-preview", help="Preview whether task quality evidence satisfies its contract")
-    quality_preview.add_argument("--db", default="mac.db")
+    quality_preview.add_argument("--db", default=_cli_db_arg())
     quality_preview.add_argument("--task-id", required=True)
 
     task_readiness = subcommands.add_parser("task-readiness", help="Preview a task's recommended next action")
-    task_readiness.add_argument("--db", default="mac.db")
+    task_readiness.add_argument("--db", default=_cli_db_arg())
     task_readiness.add_argument("--task-id", required=True)
 
     accept = subcommands.add_parser("accept", help="Accept a task handoff")
-    accept.add_argument("--db", default="mac.db")
+    accept.add_argument("--db", default=_cli_db_arg())
     accept.add_argument("--task-id", required=True)
     accept.add_argument("--agent-id", required=True)
 
     start = subcommands.add_parser("start", help="Mark a task running")
-    start.add_argument("--db", default="mac.db")
+    start.add_argument("--db", default=_cli_db_arg())
     start.add_argument("--task-id", required=True)
     start.add_argument("--agent-id", required=True)
 
     quality = subcommands.add_parser("quality", help="Record quality evidence")
-    quality.add_argument("--db", default="mac.db")
+    quality.add_argument("--db", default=_cli_db_arg())
     quality.add_argument("--task-id", required=True)
     quality.add_argument("--command", dest="quality_command", required=True)
     quality.add_argument("--status", choices=["passed", "failed"], required=True)
     quality.add_argument("--evidence", action="append", default=[])
 
     complete = subcommands.add_parser("complete", help="Complete a task after quality gate")
-    complete.add_argument("--db", default="mac.db")
+    complete.add_argument("--db", default=_cli_db_arg())
     complete.add_argument("--task-id", required=True)
     complete.add_argument("--agent-id", required=True)
 
     done = subcommands.add_parser("done", help="Finish a task in one step: quality + handoff + complete (or review-ready)")
-    done.add_argument("--db", default="mac.db")
+    done.add_argument("--db", default=_cli_db_arg())
     done.add_argument("--task-id", required=True)
     done.add_argument("--agent-id", required=True)
     done.add_argument("--quality-command", help="Quality check command (e.g. 'pytest -q')")
@@ -217,21 +218,21 @@ def _build_parser() -> argparse.ArgumentParser:
     done.add_argument("--verification", action="append", default=[], help="Verification entries (command:result:description)")
 
     fail = subcommands.add_parser("fail", help="Mark a task failed")
-    fail.add_argument("--db", default="mac.db")
+    fail.add_argument("--db", default=_cli_db_arg())
     fail.add_argument("--task-id", required=True)
     fail.add_argument("--agent-id", required=True)
     fail.add_argument("--error-code", required=True)
     fail.add_argument("--message", default="")
 
     checkpoint = subcommands.add_parser("checkpoint", help="Record a task recovery checkpoint")
-    checkpoint.add_argument("--db", default="mac.db")
+    checkpoint.add_argument("--db", default=_cli_db_arg())
     checkpoint.add_argument("--task-id", required=True)
     checkpoint.add_argument("--agent-id", required=True)
     checkpoint.add_argument("--summary", required=True)
     checkpoint.add_argument("--artifact-ref", action="append", default=[])
 
     retry = subcommands.add_parser("retry", help="Retry a failed task")
-    retry.add_argument("--db", default="mac.db")
+    retry.add_argument("--db", default=_cli_db_arg())
     retry.add_argument("--task-id", required=True)
     retry.add_argument("--agent-id", required=True)
     retry.add_argument("--fallback-agent-id")
@@ -240,7 +241,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "review-lifecycle",
         help="Mark, accept, or reject a task review",
     )
-    review_lifecycle.add_argument("--db", default="mac.db")
+    review_lifecycle.add_argument("--db", default=_cli_db_arg())
     review_lifecycle.add_argument("--action", choices=["mark-ready", "accept", "reject"], required=True)
     review_lifecycle.add_argument("--task-id", required=True)
     review_lifecycle.add_argument("--agent-id")
@@ -249,44 +250,44 @@ def _build_parser() -> argparse.ArgumentParser:
     review_lifecycle.add_argument("--plan-id")
 
     cancel = subcommands.add_parser("cancel", help="Cancel a task")
-    cancel.add_argument("--db", default="mac.db")
+    cancel.add_argument("--db", default=_cli_db_arg())
     cancel.add_argument("--task-id", required=True)
     cancel.add_argument("--agent-id", required=True)
     cancel.add_argument("--reason", default="")
 
     audit = subcommands.add_parser("audit", help="Print audit trail by trace id or task id")
-    audit.add_argument("--db", default="mac.db")
+    audit.add_argument("--db", default=_cli_db_arg())
     audit_group = audit.add_mutually_exclusive_group(required=True)
     audit_group.add_argument("--trace-id", help="Trace ID to look up")
     audit_group.add_argument("--task-id", help="Task ID; trace ID is resolved via Registry.get_task()")
 
     expire = subcommands.add_parser("expire-stale", help="Expire tasks past their TTL")
-    expire.add_argument("--db", default="mac.db")
+    expire.add_argument("--db", default=_cli_db_arg())
     expire.add_argument("--auto-retry", action="store_true", help="Auto-retry tasks with retries remaining")
 
     expire_agents = subcommands.add_parser("expire-stale-agents", help="Set offline agents with stale heartbeats")
-    expire_agents.add_argument("--db", default="mac.db")
+    expire_agents.add_argument("--db", default=_cli_db_arg())
     expire_agents.add_argument("--timeout", type=int, default=None, help="Timeout in seconds (default: from policy)")
 
     cleanup = subcommands.add_parser("cleanup", help="Delete terminal tasks (failed/cancelled/rejected/superseded)")
-    cleanup.add_argument("--db", default="mac.db")
+    cleanup.add_argument("--db", default=_cli_db_arg())
     cleanup.add_argument("--status", action="append", default=[], help="Status to clean (repeatable, default: failed,cancelled,rejected,superseded)")
     cleanup.add_argument("--plan-id", help="Only clean tasks in this plan")
     cleanup.add_argument("--older-than", type=int, default=None, help="Only clean tasks older than N seconds")
 
     dashboard = subcommands.add_parser("dashboard", help="Show project overview: plans, tasks, agents, conflicts, metrics")
-    dashboard.add_argument("--db", default="mac.db")
+    dashboard.add_argument("--db", default=_cli_db_arg())
 
     next_cmd = subcommands.add_parser(
         "next", help="Claim + start the next ready task and print its worker packet"
     )
-    next_cmd.add_argument("--db", default="mac.db")
+    next_cmd.add_argument("--db", default=_cli_db_arg())
     next_cmd.add_argument("--agent-id", required=True)
     next_cmd.add_argument("--capability", required=True)
     next_cmd.add_argument("--best-effort", action="store_true")
 
     observe = subcommands.add_parser("observe", help="Record an observed agent outcome")
-    observe.add_argument("--db", default="mac.db")
+    observe.add_argument("--db", default=_cli_db_arg())
     observe.add_argument("--agent-id", required=True)
     observe.add_argument("--capability", required=True)
     observe.add_argument("--task-type", required=True)
@@ -295,7 +296,7 @@ def _build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--error-code")
 
     score = subcommands.add_parser("capability-score", help="Print observed capability score")
-    score.add_argument("--db", default="mac.db")
+    score.add_argument("--db", default=_cli_db_arg())
     score.add_argument("--agent-id", required=True)
     score.add_argument("--capability", required=True)
 
@@ -309,19 +310,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "test", help="Dry-run a named scorer against proposed tasks"
     )
     scoring_test.add_argument("--name", required=True, help="Scorer name registered in mac.scoring")
-    scoring_test.add_argument("--db", default="mac.db")
+    scoring_test.add_argument("--db", default=_cli_db_arg())
     scoring_test.add_argument("--limit", type=int, default=5)
     scoring_test.add_argument("--project-context")
 
     claim = subcommands.add_parser("claim", help="Claim the next proposed task by capability")
-    claim.add_argument("--db", default="mac.db")
+    claim.add_argument("--db", default=_cli_db_arg())
     claim.add_argument("--agent-id", required=True)
     claim.add_argument("--capability", required=True)
     claim.add_argument("--project-context")
     claim.add_argument("--best-effort", action="store_true")
 
     run_once = subcommands.add_parser("run-once", help="Run one local agent adapter cycle")
-    run_once.add_argument("--db", default="mac.db")
+    run_once.add_argument("--db", default=_cli_db_arg())
     run_once.add_argument("--agent-id", required=True)
     run_once.add_argument("--name", required=True)
     run_once.add_argument("--capability", required=True)
@@ -414,6 +415,14 @@ def _cmd_scoring_test(args) -> int:
     _print_json(payload)
     return 0
 
+
+def _cli_db_arg() -> str:
+    """Return the default value for ``--db`` across CLI subcommands.
+
+    Falls back from ``MAC_DB_PATH`` env var to ``mac.db``, matching the
+    resolution logic in ``mcp_server._resolve_db_path()``.
+    """
+    return os.environ.get("MAC_DB_PATH", "mac.db")
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)

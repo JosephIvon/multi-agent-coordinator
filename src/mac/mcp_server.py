@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -15,9 +18,32 @@ from mac.quality.gate import evaluate_quality_gate
 from mac.registry import Registry
 from mac.storage.sqlite import SQLiteTaskLedger
 
+logger = logging.getLogger("mac.mcp_server")
 mcp = FastMCP("mac-coordinator")
 
-_DB_PATH = Path("mac.db")
+_DB_PATH: Path | None = None
+
+
+def _resolve_db_path() -> Path:
+    """Resolve the SQLite DB path from ``MAC_DB_PATH`` env var, or default.
+
+    The resolved absolute path is memoised so all tool calls within one
+    process life use the same database file, even if the env var changes
+    mid-run (which it shouldn't).
+    """
+    global _DB_PATH
+    if _DB_PATH is None:
+        raw = os.environ.get("MAC_DB_PATH", "mac.db")
+        resolved = Path(raw).resolve()
+        # Ensure the parent directory exists so SQLite doesn't fail silently.
+        try:
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # Read-only filesystem, network path, etc. — let SQLite surface
+            # the error later with a clear message.
+            pass
+        _DB_PATH = resolved
+    return _DB_PATH
 
 
 def _registry() -> Registry:
@@ -634,4 +660,10 @@ def mac_test_scorer(
 
 def main() -> None:
     """Run the MCP server over stdio transport."""
+    resolved = _resolve_db_path()
+    env_val = os.environ.get("MAC_DB_PATH", "<unset>")
+    logger.info("mac-mcp-server DB: %s (MAC_DB_PATH=%s)", resolved, env_val)
+    # Also print to stderr so it's visible in Claude Code's MCP server log
+    # even when logging isn't configured.
+    print(f"[mac-mcp-server] DB path: {resolved}", file=sys.stderr)
     mcp.run()
