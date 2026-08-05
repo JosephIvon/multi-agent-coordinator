@@ -115,7 +115,7 @@ def _long_registry() -> Registry:
 
 
 # ---------------------------------------------------------------------------
-# Tools (15 + 3 scoring = 18)
+# Tools (26 across 5 categories: 12 task + 3 maintenance + 3 scoring + 4 knowledge + 4 lease)
 # ---------------------------------------------------------------------------
 
 
