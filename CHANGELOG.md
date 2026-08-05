@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0] - 2026-08-05
+
+### Added
+
+- **Role-based agent routing (C-1):** `AgentCard.roles` and `TaskTransfer.required_role` implement tiered agent model (arch/core/crud/test/review). Role-gated `claim_next_task` ensures only matching agents claim role-specific tasks. New `mac://kanban` MCP resource + `mac-agent kanban --json` CLI.
+- **Quality gate strengthening (C-2):** `TestContract` now enforces `max_diff_lines` (line limit per risk tier), `require_changelog` (changelog mandatory for medium+ risk), and `require_acceptance_criteria` (mandatory for high risk). `done()` hard-fails on gate violation — calls `block_task()` instead of returning soft status.
+- **Kanban integration (C-3):** `Registry.get_kanban()` public method returns four-color board (red/yellow/green/done). Refactored MCP resource to delegate. Session-start hook injects kanban for cross-session awareness.
+- **Timebox + auto-rollback (D):** `TaskTransfer.lease_seconds` and `claimed_at` fields for per-attempt task leases. `Registry.expire_task_leases()` auto-releases timed-out tasks back to `proposed` (or fails them if retries exhausted).
+- **Cross-IDE MCP tools (E):** Four new MCP tools for IDE-independent knowledge management:
+  - `mac_search_vault` / `mac_save_to_vault` — Obsidian vault integration via Local REST API
+  - `mac_remember` / `mac_recall` — cross-session facts stored in MAC SQLite ledger
+- **Cross-IDE bridge (B):** `mac://session-context` MCP resource returns full project snapshot (kanban + facts + agents + conflicts + metrics). MCP-first cross-IDE principle documented in vault.
+
+### Changed
+
+- `mcp_server.py`: kanban resource refactored to delegate to `Registry.get_kanban()`
+- `CLAUDE.md`: added MCP-first cross-IDE skill table and bridge architecture
+
 ## [1.1.0] - 2026-07-31
 
 ### Added
