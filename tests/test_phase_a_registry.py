@@ -1205,3 +1205,294 @@ def test_done_completes_without_test_contract(tmp_path):
 
     assert result["status"] == "completed"
     assert result["quality_gate"] == "passed"
+
+
+# ---------------------------------------------------------------------------
+# Phase D: Timebox + Auto-Rollback (expire_task_leases)
+# ---------------------------------------------------------------------------
+
+
+def _make_accepted_task(
+    registry: Registry,
+    task_id: str = "t-lease",
+    agent_id: str = "a1",
+    *,
+    lease_seconds: int = 30,
+) -> TaskTransfer:
+    """Helper: register agent, submit task with lease, accept handoff.
+
+    Returns the task in ``accepted`` status with ``claimed_at`` set.
+    """
+    registry.register_agent(AgentCard(
+        agent_id=agent_id,
+        name="LeaseAgent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    task = _task(task_id, lease_seconds=lease_seconds)
+    registry.submit_task(task)
+    return registry.accept_handoff(task_id, agent_id)
+
+
+def _make_running_lease_task(
+    registry: Registry,
+    task_id: str = "t-lease",
+    agent_id: str = "a1",
+    *,
+    lease_seconds: int = 30,
+) -> TaskTransfer:
+    """Helper: register, submit, accept, start — task in ``running`` with lease."""
+    registry.register_agent(AgentCard(
+        agent_id=agent_id,
+        name="LeaseAgent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    task = _task(task_id, lease_seconds=lease_seconds)
+    registry.submit_task(task)
+    registry.accept_handoff(task_id, agent_id)
+    return registry.start_task(task_id, agent_id)
+
+
+def test_lease_claimed_at_set_on_accept(tmp_path):
+    """D: claimed_at is set when agent accepts a task with lease_seconds > 0."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _make_accepted_task(registry, lease_seconds=30)
+
+    assert task.claimed_at, "claimed_at should be set on accept"
+    assert task.status == "accepted"
+
+
+def test_lease_claimed_at_set_on_start(tmp_path):
+    """D: claimed_at is set when agent starts a task with lease_seconds > 0."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _make_running_lease_task(registry, lease_seconds=30)
+
+    assert task.claimed_at, "claimed_at should be set on start"
+    assert task.status == "running"
+
+
+def test_lease_no_expiry_when_lease_seconds_is_zero(tmp_path):
+    """D: tasks with lease_seconds=0 never expire."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _make_running_lease_task(registry, lease_seconds=0)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 0
+    t = registry.get_task(task.task_id)
+    assert t.status == "running"
+
+
+def test_lease_no_expiry_when_within_window(tmp_path):
+    """D: task with lease_seconds=3600 does not expire immediately."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_lease_task(registry, lease_seconds=3600)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 0
+
+
+def test_lease_auto_retry_resets_to_proposed_and_increments_retry_count(tmp_path):
+    """D: auto_retry=True + retries remaining → task resets to proposed."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    task = _make_running_lease_task(registry, lease_seconds=1)
+
+    # Advance time past lease
+    time.sleep(1.1)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 1
+    assert expired[0].task_id == task.task_id
+    assert expired[0].status == "proposed"
+    assert expired[0].retry_count == 1
+    assert expired[0].claimed_at == "", "claimed_at should be cleared"
+    assert expired[0].error_code is None
+
+    # Verify persisted state
+    t = registry.get_task(task.task_id)
+    assert t.status == "proposed"
+    assert t.retry_count == 1
+    assert t.claimed_at == ""
+
+
+def test_lease_auto_retry_fails_when_retries_exhausted(tmp_path):
+    """D: auto_retry=True but retry_count >= max_retry_count → task fails."""
+    policy = CoordinationPolicy(max_retry_count=1)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    # Pre-set retry_count to max
+    task = _task(
+        "t-exhausted",
+        lease_seconds=1,
+        retry_count=1,
+    )
+    registry.register_agent(AgentCard(
+        agent_id="a1",
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    registry.submit_task(task)
+    registry.accept_handoff("t-exhausted", "a1")
+    registry.start_task("t-exhausted", "a1")
+
+    time.sleep(1.1)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 1
+    assert expired[0].task_id == "t-exhausted"
+    assert expired[0].status == "failed"
+    assert expired[0].error_code == "LEASE_EXPIRED"
+
+
+def test_lease_no_auto_retry_always_fails(tmp_path):
+    """D: auto_retry=False (default) → always fail, even with retries remaining."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_lease_task(registry, lease_seconds=1)
+
+    time.sleep(1.1)
+
+    expired = registry.expire_task_leases(auto_retry=False)
+
+    assert len(expired) == 1
+    assert expired[0].status == "failed"
+    assert expired[0].error_code == "LEASE_EXPIRED"
+
+
+def test_lease_expires_accepted_tasks(tmp_path):
+    """D: lease expiry scans accepted status, not just running."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_accepted_task(registry, task_id="t-accepted", lease_seconds=1)
+
+    time.sleep(1.1)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 1
+    assert expired[0].task_id == "t-accepted"
+    assert expired[0].status == "proposed"  # auto-retry reset
+
+
+def test_lease_does_not_expire_completed_tasks(tmp_path):
+    """D: lease expiry ignores tasks in terminal states."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="a1",
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    # Submit and complete a task that had a lease
+    task = _task("t-done", lease_seconds=1)
+    registry.submit_task(task)
+    registry.accept_handoff("t-done", "a1")
+    registry.start_task("t-done", "a1")
+    registry.done("t-done", "a1", quality_result={"command": "pytest", "status": "passed"})
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 0
+    assert registry.get_task("t-done").status == "completed"
+
+
+def test_lease_skips_tasks_without_claimed_at(tmp_path):
+    """D: tasks with lease_seconds>0 but no claimed_at are skipped."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    # Submit a task with lease but don't accept/start it
+    registry.register_agent(AgentCard(
+        agent_id="a1",
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    task = _task("t-no-claim", lease_seconds=1)
+    registry.submit_task(task)
+    # Task is still proposed — never accepted, so claimed_at is empty
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 0
+
+
+def test_lease_explicit_now_param_deterministic(tmp_path):
+    """D: expire_task_leases respects the 'now' parameter for deterministic testing."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    _make_running_lease_task(registry, lease_seconds=30)
+
+    # Use a 'now' timestamp far in the future
+    far_future = time.time() + 3600
+
+    expired = registry.expire_task_leases(now=far_future, auto_retry=True)
+
+    # With now=far_future, lease has definitely expired
+    assert len(expired) == 1
+    assert expired[0].status == "proposed"
+
+
+def test_lease_retry_count_persists_across_cycles(tmp_path):
+    """D: retry_count increments on each lease-expiry retry cycle."""
+    policy = CoordinationPolicy(max_retry_count=3)
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"), policy=policy)
+    _make_running_lease_task(registry, lease_seconds=1)
+
+    # First expiry
+    time.sleep(1.1)
+    first = registry.expire_task_leases(auto_retry=True)
+    assert len(first) == 1
+    assert first[0].retry_count == 1
+
+    # Re-claim and start the task
+    registry.accept_handoff("t-lease", "a1")
+    registry.start_task("t-lease", "a1")
+
+    # Second expiry
+    time.sleep(1.1)
+    second = registry.expire_task_leases(auto_retry=True)
+    assert len(second) == 1
+    assert second[0].retry_count == 2
+
+    # Re-claim and start again
+    registry.accept_handoff("t-lease", "a1")
+    registry.start_task("t-lease", "a1")
+
+    # Third expiry — retry_count now 3, should exhaust
+    time.sleep(1.1)
+    third = registry.expire_task_leases(auto_retry=True)
+    assert len(third) == 1
+    assert third[0].retry_count == 3
+    assert third[0].status == "proposed"  # still proposed, retries exhausted
+
+    # Re-claim one more time
+    registry.accept_handoff("t-lease", "a1")
+    registry.start_task("t-lease", "a1")
+
+    # Fourth expiry — retries exhausted → fail
+    time.sleep(1.1)
+    fourth = registry.expire_task_leases(auto_retry=True)
+    assert len(fourth) == 1
+    assert fourth[0].status == "failed"
+    assert fourth[0].error_code == "LEASE_EXPIRED"
+
+
+def test_lease_multiple_tasks_expire_together(tmp_path):
+    """D: expire_task_leases handles multiple tasks with expired leases."""
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.register_agent(AgentCard(
+        agent_id="a1",
+        name="Agent",
+        capabilities=[AgentCapability(name="write_code")],
+    ))
+    for i in range(3):
+        task = _task(f"t-{i}", lease_seconds=1)
+        registry.submit_task(task)
+        registry.accept_handoff(f"t-{i}", "a1")
+        registry.start_task(f"t-{i}", "a1")
+
+    time.sleep(1.1)
+
+    expired = registry.expire_task_leases(auto_retry=True)
+
+    assert len(expired) == 3
+    statuses = {t.task_id: t.status for t in expired}
+    assert all(s == "proposed" for s in statuses.values())
+    for t in expired:
+        assert t.retry_count == 1
+        assert t.claimed_at == ""
