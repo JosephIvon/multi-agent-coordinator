@@ -15,8 +15,19 @@ def test_bootstrap_generates_thin_idempotent_ide_entries(tmp_path):
     claude = (tmp_path / "CLAUDE.md").read_text(encoding="utf-8")
     assert "# Existing facts" in claude
     assert claude.count(BEGIN) == 1
+    # v1.2.0: the entry block now references MAC concepts like kanban, session-context,
+    # and role routing. These are meta-instructions (not duplicated state), and each
+    # file should contain them.
     for path in first:
-        assert "task state" not in path.read_text(encoding="utf-8").lower() if path.suffix in {".md", ".mdc"} else True
+        content = path.read_text(encoding="utf-8") if path.suffix in {".md", ".mdc", ".json"} else ""
+        # MCP config files should be compact
+        if path.name.endswith(".json"):
+            assert 100 < len(content) < 500, f"{path.name} should be a small config, got {len(content)} bytes"
+        # Rule files must contain the v1.2.0 session-start workflow
+        if path.suffix in {".md", ".mdc"}:
+            assert "Session Start" in content, f"{path.name} missing Session Start section"
+            assert "mac://kanban" in content, f"{path.name} missing kanban resource ref"
+
 
 
 def test_bootstrap_is_byte_idempotent_and_preserves_frontmatter(tmp_path):
