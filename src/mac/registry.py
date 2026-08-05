@@ -190,6 +190,11 @@ class Registry:
 
     def register_agent(self, agent: Any) -> None:
         self.ledger.save_agent_card(agent)
+        try:
+            from mac.extensions import call_hook
+            call_hook("on_agent_registered", agent=agent)
+        except Exception:
+            pass
 
     def register(self, agent: Any) -> None:
         self.register_agent(agent)
@@ -434,6 +439,7 @@ class Registry:
         self.ledger.save_task_transfer(task)
         self._audit(task, "fail_task", agent_id, message=message, from_status=None, to_status="failed")
         self._publish(task, "task_failed", actor=agent_id, to_status="failed", payload={"error_code": error_code})
+        self._invoke_hook("on_task_failed", task_id=task_id, agent_id=agent_id, error_code=error_code, message=message)
         return task
 
     def expire_stale_tasks(
@@ -855,12 +861,14 @@ class Registry:
                 agent_id=agent_id,
                 reason=f"quality_gate_failed:{reason or 'unknown'}",
             )
-            return {
+            blocked_result = {
                 "status": "blocked",
                 "task_id": task_id,
                 "quality_gate": "failed",
                 "reason": reason,
             }
+            self._invoke_hook("on_task_blocked", task_id=task_id, agent_id=agent_id, reason=reason, result=blocked_result)
+            return blocked_result
 
         # 3. Branch on require_review.
         if self.policy.require_review:
@@ -872,6 +880,7 @@ class Registry:
                 "quality_gate": "passed",
                 "review": True,
             }
+            self._invoke_hook("on_task_done", task_id=task_id, agent_id=agent_id, status="review_ready", result=result)
             if detect_conflicts:
                 conflicts = self.detect_file_overlap_conflicts(
                     task_id, guarded_patterns=guarded_patterns,
@@ -908,6 +917,7 @@ class Registry:
             "quality_gate": "passed",
             "review": False,
         }
+        self._invoke_hook("on_task_done", task_id=task_id, agent_id=agent_id, status="completed", result=result)
         if detect_conflicts:
             conflicts = self.detect_file_overlap_conflicts(
                 task_id, guarded_patterns=guarded_patterns,
@@ -1838,6 +1848,23 @@ class Registry:
                 payload=payload or {},
             )
         )
+
+    @staticmethod
+    def _invoke_hook(name: str, **kwargs: Any) -> list[Any]:
+        """Invoke a named extension hook with kwargs, returning results.
+
+        Hooks are best-effort: if ``mac.extensions`` is not available or a hook
+        raises, the exception is logged and skipped.  This is intentionally
+        lightweight — the hook contract is "notify, don't block."
+        """
+        try:
+            from mac.extensions import call_hook
+        except ImportError:
+            return []
+        try:
+            return call_hook(name, **kwargs)
+        except Exception:
+            return []
 
     def _publish_plan(
         self,

@@ -1,8 +1,8 @@
 # Multi-Agent Coordinator (MAC) Specification
 
-> Version: 2.5
-> Date: 2026-07-23
-> Status: implemented for Phase C production readiness
+> Version: 2.6
+> Date: 2026-08-05
+> Status: implemented for v1.2.0
 
 ---
 
@@ -18,13 +18,14 @@ MAC is intentionally not an execution engine. External agents still run in their
 
 ### AgentCard
 
-Agents advertise capabilities and optional path boundaries.
+Agents advertise capabilities, optional roles, and optional path boundaries.
 
 ```python
 class AgentCard(BaseModel):
     agent_id: str
     name: str
     capabilities: list[AgentCapability]
+    roles: list[str] = Field(default_factory=list)
     load: int = Field(default=0, ge=0, le=100)
     status: str = "online"
     last_heartbeat: float = 0
@@ -32,6 +33,8 @@ class AgentCard(BaseModel):
     allowed_paths: list[str] = Field(default_factory=list)
     forbidden_paths: list[str] = Field(default_factory=list)
 ```
+
+`roles` enables tiered agent model: `arch` (architecture design), `core` (core logic), `crud` (boilerplate), `test` (testing), `review` (code review). An agent may hold multiple roles.
 
 Empty `allowed_paths` and `forbidden_paths` means no agent-level path restriction.
 
@@ -55,7 +58,15 @@ class TaskTransfer(BaseModel):
     retry_count: int = 0
     fallback_agent_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    required_role: str | None = None
+    lease_seconds: int = Field(default=0, ge=0)
+    claimed_at: str = Field(default="")
+    error_code: str | None = None
 ```
+
+`required_role` gates `claim_next_task()` — only agents whose `roles` includes the value can claim the task. `None` means no role restriction.
+
+`lease_seconds` is the maximum time an agent may hold a task once claimed. `claimed_at` is the ISO timestamp of the last accept/start. See §6.2 Phase D.
 
 `TaskTransfer` does not embed `HandoffResult`. Handoff records are stored separately so task rows stay small.
 
@@ -124,6 +135,7 @@ proposed -> accepted -> running -> completed
     v          v           v
  rejected   rejected     failed
                          cancelled
+                         blocked
 ```
 
 ### With Review (`require_review=True`)
@@ -135,18 +147,20 @@ proposed -> accepted -> running -> review_ready -> completed
  rejected   rejected     failed     rejected
                                      (reason → conflict)
                          cancelled
+                         blocked
 ```
 
 Rules:
 
 - `proposed -> accepted`: explicit accept or `claim_next_task()`.
 - `accepted -> running`: `start_task()`.
-- `running -> completed`: `complete_task()` after the quality gate allows completion (only when `require_review=False`).
+- `running -> completed`: `done()` / `complete_task()` after the quality gate allows completion.
+- `running -> blocked`: `done()` hard-fails on quality gate violation → `block_task()` (C-2).
 - `running -> review_ready`: `mark_review_ready()` (only when `require_review=True`). Optionally saves handoff.
 - `review_ready -> completed`: `accept_review()`.
 - `review_ready -> rejected`: `reject_review()`. Rejection reason is automatically recorded as a `ConflictRecord` with `source="reject_review"`.
 - `running -> failed`: `fail_task()`.
-- Any non-terminal task (including `review_ready`) can become `cancelled`.
+- Any non-terminal task (including `review_ready` and `blocked`) can become `cancelled`.
 - When `require_review=True`, calling `complete_task()` on a `running` task raises `StateConflictError`.
 
 ---
@@ -220,7 +234,7 @@ Environment variable mapping (`from_env()`):
 Main operations:
 
 - Agent: `register()`, `discover()`, `heartbeat_agent()`
-- Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `done()`, `fail_task()`, `cancel_task()`
+- Task lifecycle: `submit_task()`, `claim_next_task()`, `accept_handoff()`, `start_task()`, `complete_task()`, `done()`, `fail_task()`, `cancel_task()`, `block_task()`
 - Review: `mark_review_ready()`, `accept_review()`, `reject_review()`
 - Quality: `submit_quality_result()`, `preview_quality_gate()`, `preview_task_readiness()`
 - Plan: `create_plan()`, `activate_plan()`, `close_plan()`, `list_plans()`
@@ -228,9 +242,12 @@ Main operations:
 - Handoff: `save_handoff_result()`, `get_handoff_result()`
 - Conflict: `record_conflict()`, `list_conflicts()`, `resolve_conflict()`
 - Packet: `prepare_worker_packet()`, `prepare_review_packet()`
-- Expiry: `expire_stale_tasks()`, `expire_stale_agents()`
+- Kanban: `get_kanban()`
+- Expiry: `expire_stale_tasks()`, `expire_stale_agents()`, `expire_task_leases()`
+- Facts: `remember_fact()`, `recall_facts()`
 - Audit: `get_audit_trail(trace_id)`
 - Metrics: `get_metrics()`
+- Scoring: `list_scorers()`, `set_scorer()`, `test_scorer()`
 
 CLI and HTTP adapters are thin wrappers around this API.
 
@@ -297,15 +314,99 @@ registry = Registry(ledger, policy=policy)
 
 Environment variable: `MAC_REVIEWER_CAPABILITY=review_code`.
 
+### B-6: Cross-IDE Bridge (`mac://session-context`)
+
+`mac://session-context` MCP resource returns a complete project snapshot:
+
+```json
+{
+  "kanban": { "red": {...}, "yellow": {...}, "green": {...}, "done": {...} },
+  "recent_facts": [...],
+  "active_agents": [...],
+  "open_conflicts": [...],
+  "metrics": {...}
+}
+```
+
+This is the primary entry point for cross-IDE session recovery. See §9 for full MCP tool/resource listing.
+
 ---
 
 ## 6.2 Phase C Features
 
-### C-1: Publish Workflow
+### C-1: Role-Based Agent Routing
+
+`AgentCard.roles` (list of role strings) and `TaskTransfer.required_role` implement a tiered agent model:
+
+```
+arch -> core -> crud -> test
+  \____________________/
+         review (cross-cutting)
+```
+
+`claim_next_task()` role gates:
+- If `required_role` is set on the task, only agents whose `roles` include it can claim
+- If `required_role` is `None`, any agent can claim (open task)
+- If the agent has no matching role, `claim_next_task()` returns `None` (skips the task silently)
+
+```
+mac-agent register --agent-id codex --name Codex --roles arch,review
+mac-agent submit --task-id t1 --required-role arch ...
+```
+
+### C-2: Quality Gate Hardening
+
+`TestContract` enforces three additional checks based on risk level:
+
+| Risk | max_diff_lines | require_changelog | require_acceptance_criteria |
+|------|---------------|-------------------|---------------------------|
+| low | None (no limit) | False | False |
+| medium | 500 | True | False |
+| high | 300 | True | True |
+
+Custom contracts can override all defaults:
+
+```python
+TestContract.for_risk("medium", max_diff_lines=200, require_acceptance_criteria=True)
+```
+
+`done()` **hard-fails** on gate violation: calls `block_task()` (transitioning to `blocked` status with `error_code="TASK_BLOCKED"`) instead of returning a soft status. Backward compatibility: caller must explicitly pass `has_changelog` / `met_acceptance_criteria` to trigger C-2 checks; legacy `complete_task()` callers pass `None` sentinels and skip the new checks.
+
+`done()` signature:
+
+```python
+def done(
+    self, task_id: str, agent_id: str, *,
+    quality_result: dict[str, Any] | None = None,
+    handoff: HandoffResult | None = None,
+    has_changelog: bool | None = None,
+    met_acceptance_criteria: list[str] | None = None,
+) -> dict:
+```
+
+### C-3: Publish Workflow
 
 Tag-triggered PyPI upload via GitHub Actions (`.github/workflows/publish.yml`). Uses PyPI trusted publishing — no API token needed after initial setup.
 
-### C-2: Retry with TTL Expiry
+### C-3: Kanban Board
+
+`Registry.get_kanban()` returns a four-color board:
+
+```python
+{
+    "red":    {"count": N, "tasks": [...task_ids...]},  # proposed
+    "yellow": {"count": N, "tasks": [...]},              # accepted + running
+    "green":  {"count": N, "tasks": [...]},              # review_ready
+    "done":   {"total": N, "completed": C, "failed": F, "cancelled": X}
+}
+```
+
+MCP resource: `mac://kanban`
+CLI: `mac-agent kanban --json`
+
+Session-start hooks inject the kanban for cross-session awareness.
+
+### C-4: Retry with TTL Expiry
 
 `expire_stale_tasks(auto_retry=True)` resets tasks with remaining retries to `proposed` instead of `failed`. The retry count is incremented and an audit event with `trigger=ttl_expiry` is recorded.
 
@@ -313,7 +414,7 @@ CLI: `mac-agent expire-stale --auto-retry`
 MCP: `mac_expire_stale_tasks(auto_retry=True)`
 HTTP: `POST /tasks/expire-stale?auto_retry=true`
 
-### C-3: Agent Heartbeat Expiry
+### C-5: Agent Heartbeat Expiry
 
 `expire_stale_agents()` sets agents offline if their `last_heartbeat` is older than the timeout. Defaults to `policy.agent_timeout` (300s, configurable via `MAC_AGENT_TIMEOUT`).
 
@@ -321,30 +422,95 @@ CLI: `mac-agent expire-stale-agents --timeout 300`
 MCP: `mac_expire_stale_agents(timeout_seconds=300)`
 HTTP: `POST /agents/expire-stale?timeout_seconds=300`
 
-### C-4: Structured Logging
+### C-6: Structured Logging
 
 CLI uses Python `logging` module instead of `print()` for diagnostic output. Machine-parseable output (JSON, Markdown packets) stays on stdout; diagnostics go to stderr. Global flags: `--verbose` (DEBUG), `--quiet` (WARNING).
 
-### C-5: Dashboard Command
+### C-7: Dashboard Command
 
 `mac-agent dashboard` shows a concise project overview: active plans with task counts, ready/in-flight/review-ready tasks, online agents, unresolved conflicts, and key metrics.
 
-### C-6: Done Command
+### C-8: Done Command
 
 `done()` is the single entry point for finishing a task. It atomically orchestrates: submit quality evidence (if provided) → evaluate quality gate → save handoff (if provided) → auto-branch on `require_review` to either `complete_task()` or `mark_review_ready()`.
 
-Registry: `registry.done(task_id, agent_id, *, quality_result=None, handoff=None) → dict`
+Registry: `registry.done(task_id, agent_id, *, quality_result=None, handoff=None, has_changelog=None, met_acceptance_criteria=None) → dict`
 
 Returns:
 - `{"status": "completed", "task_id": ..., "quality_gate": "passed", "review": False}` — no review required
 - `{"status": "review_ready", "task_id": ..., "quality_gate": "passed", "review": True}` — review required
-- `{"status": "running", "task_id": ..., "quality_gate": "failed", "reason": ...}` — gate not passed
+- `{"status": "blocked", "task_id": ..., "quality_gate": "failed", "reason": ...}` — gate hard-failed
 
 CLI: `mac-agent done --task-id T --agent-id A [--quality-command CMD --quality-status passed|failed] [--changed-file FILE] [--risk RISK]`
 
 MCP: `mac_done(task_id, agent_id, quality_result?, changed_files?, risks?)`
 
 HTTP: `POST /tasks/{task_id}/done` with body `{agent_id, quality_result?, changed_files?, risks?}`
+
+### C-9: Pluggable Scoring
+
+`mac.scoring` module allows custom (sync or async) scoring functions to reorder `list_ready_tasks()` results. Built-in: `priority_scorer`. Register custom scorers by name:
+
+```python
+register_scorer("load_aware", lambda t: t.priority - t.retry_count * 0.1)
+registry = Registry(ledger, scoring_fn="load_aware")
+```
+
+Async scorers (LLM-backed) use `alist_ready_tasks()`. MCP tools: `mac_list_scorers`, `mac_set_scorer`, `mac_test_scorer`.
+
+---
+
+## 6.3 Phase D: Timebox + Auto-Rollback
+
+`TaskTransfer.lease_seconds` and `claimed_at` implement per-attempt task leases.
+
+When an agent accepts and starts a task with `lease_seconds > 0`:
+1. `claimed_at` is set to the current ISO timestamp
+2. The agent has `lease_seconds` to complete the task before the lease expires
+
+`Registry.expire_task_leases(auto_retry=False)` scans `accepted`/`running` tasks:
+- If `(now - claimed_at) > lease_seconds` and `lease_seconds > 0`: the lease is expired
+- With `auto_retry=True` and remaining retries: resets to `proposed` (clears `claimed_at`, increments `retry_count`)
+- Without retries: transitions to `failed` with `error_code="LEASE_EXPIRED"`
+
+A task with `lease_seconds=0` has no time limit.
+
+```python
+expired = reg.expire_task_leases(auto_retry=True)  # returns list of expired TaskTransfer
+```
+
+CLI: `mac-agent expire-task-leases --auto-retry`
+MCP: `mac_expire_task_leases(auto_retry=True)`
+HTTP: `POST /tasks/expire-leases?auto_retry=true`
+
+---
+
+## 6.4 Phase E: Cross-IDE Knowledge Management
+
+### Facts Table
+
+SQLite ledger stores cross-session facts:
+
+```sql
+CREATE TABLE IF NOT EXISTS facts (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+)
+```
+
+Registry API: `remember_fact(key, value, category)` / `recall_facts(query, limit=10)`.
+
+### Obsidian Vault Integration
+
+Two MCP tools for IDE-independent vault access via Obsidian Local REST API (https://127.0.0.1:27124):
+
+- `mac_search_vault(query, limit=10)` — full-text search
+- `mac_save_to_vault(content, path, privacy="private")` — create/update notes with frontmatter
+
+Requires Bearer auth token (env var `OBSIDIAN_API_TOKEN`).
 
 ---
 
@@ -362,8 +528,9 @@ Tables:
 | `plans` | Plan JSON and plan status |
 | `handoff_results` | Structured handoff JSON by task |
 | `conflict_records` | Conflict JSON and resolved index |
+| `facts` | Cross-session key-value facts for IDE-independent recall |
 
-SQLite WAL mode is enabled. Phase A is intended for a local single-workspace setup.
+SQLite WAL mode is enabled.
 
 The `audit_entries` table has a `trace_id` column (default empty) with index `idx_audit_trace(trace_id, created_at)`. Pre-existing databases are auto-migrated: the column is added and `trace_id` is backfilled from the payload JSON for rows written before the column existed.
 
@@ -418,45 +585,63 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (16)
+### Tools (26)
 
-| Tool | Parameters | Returns | Side Effect |
-|------|-----------|---------|-------------|
-| `mac_next_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | Markdown worker packet | write |
-| `mac_done` | `task_id`, `agent_id`, `quality_result?`, `changed_files?`, `risks?` | JSON `{status, task_id, quality_gate, review?, reason?}` | write |
-| `mac_submit_task` | `task: dict` (TaskTransfer) | JSON TaskTransfer | write |
-| `mac_claim_task` | `agent_id`, `capability`, `project_context?`, `best_effort?` | JSON TaskTransfer | write |
-| `mac_record_quality_and_complete` | `task_id`, `agent_id`, `result: dict` | JSON `{status, task_id, reason}` | write |
-| `mac_fail_task` | `task_id`, `agent_id`, `error_code`, `message?` | JSON TaskTransfer | write |
-| `mac_save_handoff` | `task_id`, `agent_id`, `changed_files?`, `verification_passed?`, `boundary_review?`, `risks?` | JSON HandoffResult | write |
-| `mac_list_ready_tasks` | `capability?`, `project_context?` | JSON array of TaskTransfer | read-only |
-| `mac_review_packet` | `task_id` | Markdown string | read-only |
-| `mac_worker_packet` | `task_id`, `agent_id?` | Markdown string | read-only |
-| `mac_mark_review_ready` | `task_id`, `agent_id`, `handoff?` | JSON TaskTransfer | write |
-| `mac_accept_review` | `task_id`, `reviewer_id` | JSON TaskTransfer | write |
-| `mac_reject_review` | `task_id`, `reviewer_id`, `reason?` | JSON TaskTransfer | write |
-| `mac_expire_stale_tasks` | `auto_retry?` | JSON array of expired TaskTransfer | write |
-| `mac_expire_stale_agents` | `timeout_seconds?` | JSON array of expired AgentCard | write |
-| `mac_cleanup_tasks` | `statuses?`, `plan_id?`, `older_than_seconds?` | JSON array of deleted TaskTransfer | write |
+#### Task Coordination (12)
+| Tool | Function |
+|------|----------|
+| `mac_next_task` | Atomic: claim_next → start → worker_packet |
+| `mac_done` | Atomic: quality evidence → gate → complete or review_ready |
+| `mac_submit_task` | Submit a new task |
+| `mac_claim_task` | Atomic: claim_next → start |
+| `mac_record_quality_and_complete` | Quality evidence → complete (legacy, prefer `mac_done`) |
+| `mac_fail_task` | Mark task as failed |
+| `mac_save_handoff` | Save handoff result |
+| `mac_list_ready_tasks` | List dependency-ready proposed tasks |
+| `mac_review_packet` | Generate review packet |
+| `mac_worker_packet` | Generate worker packet |
+| `mac_mark_review_ready` | running → review_ready |
+| `mac_accept_review` | review_ready → completed |
+| `mac_reject_review` | review_ready → rejected |
 
-`mac_next_task` is atomic: `claim_next_task` → `start_task` → `prepare_worker_packet` in one call. This is the primary entry point for AI agents to pick up work.
+#### Maintenance (3)
+| Tool | Function |
+|------|----------|
+| `mac_expire_stale_tasks` | Expire tasks past TTL |
+| `mac_expire_stale_agents` | Mark stale agents offline |
+| `mac_cleanup_tasks` | Delete terminal tasks |
 
-`mac_done` is the primary entry point for finishing a task. It is atomic: `submit_quality_result` (if provided) → `evaluate_quality_gate` → then auto-branches on `CoordinationPolicy.require_review`: if `True`, calls `mark_review_ready` (saving handoff if provided); if `False`, calls `save_handoff_result` (if provided) → `complete_task`. Returns `status='completed'` (no review), `status='review_ready'` (review required), or `status='running'` (gate failed) with reason.
+#### Scoring (3)
+| Tool | Function |
+|------|----------|
+| `mac_list_scorers` | List registered scoring functions |
+| `mac_set_scorer` | Set active scoring function by name |
+| `mac_test_scorer` | Test a scorer against tasks |
 
-`mac_claim_task` is atomic: `claim_next_task` → `start_task` in one call.
+#### Cross-IDE Knowledge (4)
+| Tool | Function |
+|------|----------|
+| `mac_search_vault` | Full-text search Obsidian vault (REST API) |
+| `mac_save_to_vault` | Create/update note in Obsidian vault |
+| `mac_remember` | Store cross-session fact in MAC ledger |
+| `mac_recall` | Recall facts by query |
 
-`mac_record_quality_and_complete` is atomic: `submit_quality_result` → `evaluate_quality_gate` → `complete_task` (only if gate passes). Returns `status='completed'` or `status='running'` with reason. Prefer `mac_done` which also handles handoff and review lifecycle.
+#### Lease Management (4)
+| Tool | Function |
+|------|----------|
+| `mac_expire_task_leases` | Auto-release or fail expired lease tasks |
+| `mac_list_agents` | List registered agents |
+| `mac_get_task` | Get task details by ID |
+| `mac_block_task` | Block a running task with reason |
 
-`mac_worker_packet` includes the agent's `allowed_paths` and `forbidden_paths` when `agent_id` is provided.
-
-Review tools are only effective when `CoordinationPolicy.require_review=True`. `mac_mark_review_ready` transitions `running → review_ready`. `mac_accept_review` transitions `review_ready → completed`. `mac_reject_review` transitions `review_ready → rejected` and auto-records a conflict with `source="reject_review"`.
-
-### Resources (2)
+### Resources (4)
 
 | URI | Description |
 |-----|-------------|
 | `mac://capabilities` | Agents grouped by capability name |
 | `mac://health` | Health summary: `last_updated`, `open_tasks`, `inflight_agents` |
+| `mac://kanban` | Four-color board: red/yellow/green/done |
+| `mac://session-context` | Full project snapshot: kanban + facts + agents + conflicts + metrics |
 
 ### Extension HTTP and WebSocket surface
 
@@ -475,8 +660,8 @@ provide the bearer token through the `Authorization` header or the
 
 ## 10. Deferred Work
 
-- Leases, daemon workers, and automatic external-agent execution.
 - Parallel group planning and DAG visualization.
 - Redis, Postgres, gRPC, and cloud synchronization.
 - Automatic conflict resolution.
 - Project-specific role presets.
+- Daemon workers and automatic external-agent execution.

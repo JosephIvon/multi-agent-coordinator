@@ -336,7 +336,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (15 tools + 2 resources)
+  mcp_server.py      MCP Server (26 tools + 4 resources)
 ```
 
 ---
