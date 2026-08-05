@@ -22,7 +22,20 @@ class AgentCapability(BaseModel):
 
 
 class AgentCard(BaseModel):
-    """A2A-compatible agent card with MAC scheduling metadata."""
+    """A2A-compatible agent card with MAC scheduling metadata.
+
+    Roles implement the tiered agent model (per DeepSeek "commander-expert-laborer"):
+    - ``arch`` — architecture decisions, task decomposition (Codex-level)
+    - ``core`` — complex logic, algorithms, refactoring (Claude-level)
+    - ``crud`` — boilerplate, scaffolding, repetitive work (Trae-level)
+    - ``test`` — test writing, quality evidence, regression runs
+    - ``review`` — code review, quality gate enforcement
+
+    An agent may have multiple roles. Tasks specify ``required_role`` and
+    claim routing requires at least one match between agent roles and task
+    required_role. When ``required_role`` is unset on a task, any agent
+    can claim it regardless of roles.
+    """
 
     agent_id: str
     name: str
@@ -35,6 +48,7 @@ class AgentCard(BaseModel):
     project_context: str | None = None
     allowed_paths: list[str] = Field(default_factory=list)
     forbidden_paths: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -258,7 +272,12 @@ class TaskPayload(BaseModel):
 
 
 class TaskTransfer(BaseModel):
-    """Durable task handoff record tracked by the MAC ledger."""
+    """Durable task handoff record tracked by the MAC ledger.
+
+    Role routing: when ``required_role`` is set, only agents whose
+    ``AgentCard.roles`` list includes that value may claim the task.
+    When unset, any agent can claim it regardless of roles.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -277,6 +296,9 @@ class TaskTransfer(BaseModel):
     max_hops: int = Field(default=5, ge=1)
     current_hops: int = Field(default=0, ge=0)
     ttl_seconds: int = Field(default=3600, ge=1)
+    # D: per-attempt lease expiry (timebox)
+    lease_seconds: int = Field(default=0, ge=0, description="Max seconds an agent may hold this task once claimed. 0 = no limit.")
+    claimed_at: str = Field(default="", description="ISO timestamp of when the task was last claimed (accepted/started).")
 
     error_code: str | None = None
     retry_count: int = Field(default=0, ge=0)
@@ -285,6 +307,7 @@ class TaskTransfer(BaseModel):
     title: str = ""
     description: str = ""
     project_context: str | None = None
+    required_role: str | None = None
 
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = ""

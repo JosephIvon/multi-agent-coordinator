@@ -1163,7 +1163,7 @@ def test_done_without_quality_result_uses_pre_submitted(tmp_path):
 
 
 def test_done_returns_running_when_quality_gate_fails(tmp_path):
-    """done() when quality gate fails → stays running, returns failure info."""
+    """done() when quality gate fails → blocks task (C-2 hard-fail), returns blocked info."""
     from mac.testing.contracts import TestContract
 
     registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
@@ -1188,10 +1188,11 @@ def test_done_returns_running_when_quality_gate_fails(tmp_path):
         quality_result={"command": "lint", "status": "passed"},
     )
 
-    assert result["status"] == "running"
+    # C-2: hard-fail → task is blocked (was "running" before C-2)
+    assert result["status"] == "blocked"
     assert result["quality_gate"] == "failed"
     assert "reason" in result
-    assert registry.get_task("t1").status == "running"
+    assert registry.get_task("t1").status == "blocked"
 
 
 def test_done_completes_without_test_contract(tmp_path):

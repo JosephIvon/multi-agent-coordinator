@@ -15,7 +15,7 @@ from mac import scoring
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import TaskTransfer
 from mac.quality.gate import evaluate_quality_gate
-from mac.registry import Registry
+from mac.registry import Registry, _required_capability
 from mac.storage.sqlite import SQLiteTaskLedger
 
 logger = logging.getLogger("mac.mcp_server")
@@ -141,6 +141,7 @@ def mac_claim_task(
     capability: str,
     project_context: str | None = None,
     best_effort: bool = False,
+    role: str | None = None,
 ) -> str:
     """Claim the next available proposed task and start it.
 
@@ -150,6 +151,10 @@ def mac_claim_task(
     :param capability: Required capability to match.
     :param project_context: Optional project filter.
     :param best_effort: If True, consider tasks with other capabilities.
+    :param role: Optional role filter (arch/core/crud/test/review).
+        When set, only tasks whose required_role matches (or is unset)
+        are considered. When unset, the agent's registered roles are
+        matched against task required_role fields.
     :returns: JSON of the claimed-and-started TaskTransfer, or not_found.
     """
 
@@ -160,6 +165,7 @@ def mac_claim_task(
             capability=capability,
             project_context=project_context,
             best_effort=best_effort,
+            role=role,
         )
         if claimed is None:
             return None
@@ -320,16 +326,20 @@ def mac_save_handoff(
 def mac_list_ready_tasks(
     capability: str | None = None,
     project_context: str | None = None,
+    role: str | None = None,
 ) -> str:
     """List dependency-unblocked proposed tasks ready for claiming.
 
     :param capability: Optional capability filter.
     :param project_context: Optional project filter.
+    :param role: Optional role filter (arch/core/crud/test/review).
+        When set, only tasks whose required_role matches (or is unset)
+        are listed.
     :returns: JSON array of ready TaskTransfer objects.
     """
 
     def _do() -> Any:
-        return _registry().list_ready_tasks(capability=capability, project_context=project_context)
+        return _registry().list_ready_tasks(capability=capability, project_context=project_context, role=role)
 
     return _safe_call(_do)
 
@@ -443,6 +453,7 @@ def mac_next_task(
     capability: str,
     project_context: str | None = None,
     best_effort: bool = False,
+    role: str | None = None,
 ) -> str:
     """Atomically claim, start, and generate a worker packet for the next ready task.
 
@@ -452,6 +463,7 @@ def mac_next_task(
     :param capability: Required capability to match.
     :param project_context: Optional project filter.
     :param best_effort: If True, consider tasks with other capabilities.
+    :param role: Optional role filter (arch/core/crud/test/review).
     :returns: Markdown worker packet string, or not_found if no task available.
     """
 
@@ -462,6 +474,7 @@ def mac_next_task(
             capability=capability,
             project_context=project_context,
             best_effort=best_effort,
+            role=role,
         )
         if claimed is None:
             return None
@@ -515,7 +528,7 @@ def mac_cleanup_tasks(
 
 
 # ---------------------------------------------------------------------------
-# Resources (2)
+# Resources (3)
 # ---------------------------------------------------------------------------
 
 
@@ -549,6 +562,20 @@ def health_resource() -> str:
         "open_tasks": len(open_tasks),
         "inflight_agents": len(inflight),
     })
+
+
+@mcp.resource("mac://kanban")
+def kanban_resource() -> str:
+    """Four-color kanban board: tasks grouped by stage.
+
+    Returns JSON with:
+    - ``red``: proposed tasks waiting to be written (status=proposed)
+    - ``yellow``: tasks pending quality evidence (status=accepted or running)
+    - ``green``: tasks awaiting review (status=review_ready)
+    - ``done``: completed today (status=completed, with counts by agent)
+    """
+    reg = _registry()
+    return json.dumps(reg.get_kanban())
 
 
 @mcp.tool()
@@ -598,6 +625,194 @@ def mac_set_scorer(name: str | None) -> str:
         }
         return json.dumps(info)
     return _safe_call(_do)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase E: Cross-IDE knowledge tools (vault + memory)
+# ═══════════════════════════════════════════════════════════════════
+
+_OBSIDIAN_API = "https://127.0.0.1:27124"
+_OBSIDIAN_TOKEN: str | None = None
+
+
+def _obsidian_headers() -> dict[str, str]:
+    """Build Obsidian Local REST API auth headers."""
+    global _OBSIDIAN_TOKEN
+    if _OBSIDIAN_TOKEN is None:
+        _OBSIDIAN_TOKEN = os.environ.get(
+            "OBSIDIAN_API_TOKEN",
+            # Fallback: try reading from Claude config
+            "",
+        )
+    if not _OBSIDIAN_TOKEN:
+        raise ToolError("obsidian: OBSIDIAN_API_TOKEN not set — configure it in your environment")
+    return {
+        "Authorization": f"Bearer {_OBSIDIAN_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+
+@mcp.tool()
+def mac_search_vault(query: str, limit: int = 10) -> str:
+    """Search the Obsidian vault via the Local REST API.
+
+    Returns matching notes with titles, paths, and snippet previews.
+    Use this to find project context, past decisions, and technical
+    notes — the same source of truth across all IDEs.
+
+    Requires the Obsidian Local REST API plugin running on port 27124
+    and OBSIDIAN_API_TOKEN set in your environment.
+    """
+    def _do() -> Any:
+        import urllib.request
+        import urllib.error
+
+        url = f"{_OBSIDIAN_API}/search/?query={urllib.parse.quote(query)}&limit={int(limit)}"
+        req = urllib.request.Request(url, headers=_obsidian_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            raise ToolError(f"obsidian_search: HTTP {e.code} — is the Obsidian REST API plugin running?")
+        except urllib.error.URLError as e:
+            raise ToolError(f"obsidian_search: connection failed ({e.reason}) — is Obsidian running?")
+        except json.JSONDecodeError:
+            raise ToolError("obsidian_search: unexpected response format from vault API")
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_save_to_vault(
+    content: str,
+    path: str,
+    privacy: str = "private",
+) -> str:
+    """Save a note to the Obsidian vault via the Local REST API.
+
+    :param content: Markdown content of the note.
+    :param path: Vault-relative path, e.g. ``00-inbox/quick-note.md``.
+    :param privacy: Privacy marker — ``public``, ``private``, or ``company``.
+        Will be added to the note's frontmatter.
+
+    Requires the Obsidian Local REST API plugin running on port 27124
+    and OBSIDIAN_API_TOKEN set in your environment.
+    """
+    def _do() -> Any:
+        import urllib.request
+        import urllib.error
+
+        # Add frontmatter wrapper if not already present
+        if not content.strip().startswith("---"):
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            content = (
+                f"---\n"
+                f"created: {now}\n"
+                f"privacy: {privacy}\n"
+                f"source: mac-mcp\n"
+                f"---\n\n"
+                f"{content}"
+            )
+
+        url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(path, safe='')}"
+        data = json.dumps({"content": content}).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=data, headers=_obsidian_headers(), method="PUT",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return json.dumps({"saved": path, "status": resp.status})
+        except urllib.error.HTTPError as e:
+            raise ToolError(f"obsidian_save: HTTP {e.code} — {e.reason}")
+        except urllib.error.URLError as e:
+            raise ToolError(f"obsidian_save: connection failed ({e.reason}) — is Obsidian running?")
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_remember(
+    key: str,
+    value: str,
+    category: str = "general",
+) -> str:
+    """Store a key-value fact in the MAC coordination ledger.
+
+    Use this to persist decisions, bug fixes, gotchas, and context that
+    should survive across sessions. Unlike IDE-specific memory systems,
+    facts stored via mac_remember are visible to ALL agents regardless
+    of which IDE they run in (Claude Code, Codex, Trae, etc.).
+
+    :param key: Unique identifier for this fact (e.g. ``fix-login-timeout``).
+    :param value: The fact content (free text, can be multi-line).
+    :param category: Tag for grouping (``general``, ``bug``, ``decision``,
+        ``gotcha``, ``pattern``).
+    """
+    def _do() -> Any:
+        reg = _registry()
+        return reg.remember_fact(key, value, category)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_recall(query: str, limit: int = 10) -> str:
+    """Recall facts previously stored via ``mac_remember``.
+
+    Searches across keys, values, and categories. Returns the most
+    relevant facts ranked by recency. Use this at session start to
+    restore context — especially in Codex or Trae where
+    Claude Code's agentmemory is unavailable.
+
+    :param query: Search query (matches against key, value, category).
+    :param limit: Maximum number of facts to return.
+    """
+    def _do() -> Any:
+        reg = _registry()
+        return reg.recall_facts(query, int(limit))
+
+    return _safe_call(_do)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase B: Cross-IDE session context resource
+# ═══════════════════════════════════════════════════════════════════
+
+@mcp.resource("mac://session-context")
+def session_context_resource() -> str:
+    """Snapshot of current project state for cross-IDE session restore.
+
+    Returns JSON with:
+    - ``kanban``: four-color task board (red/yellow/green/done)
+    - ``recent_facts``: last 10 remembered facts from the ledger
+    - ``active_agents``: agents currently online
+    - ``open_conflicts``: unresolved conflict count
+    - ``metrics_summary``: cycle time, handoff rate, quality rate
+    """
+    reg = _registry()
+    from mac.metrics import compute_metrics
+
+    kanban = reg.get_kanban()
+    recent_facts = reg.recall_facts("", 10)
+    agents = reg.discover()
+    online = [a.agent_id for a in agents if getattr(a, "status", "") == "online"]
+    conflicts = reg.list_conflicts(resolved=False)
+    metrics = compute_metrics(reg.ledger)
+
+    return json.dumps({
+        "kanban": kanban,
+        "recent_facts": recent_facts,
+        "active_agents": online,
+        "open_conflicts": len(conflicts),
+        "metrics": {
+            "cycle_time_s": metrics.get("task_cycle_time_seconds", 0),
+            "handoff_rate": metrics.get("handoff_success_rate", 0),
+            "quality_rate": metrics.get("quality_gate_pass_rate", 0),
+            "retry_rate": metrics.get("retry_rate", 0),
+            "conflict_rate": metrics.get("conflict_rate", 0),
+        },
+    })
 
 
 @mcp.tool()

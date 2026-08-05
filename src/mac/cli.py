@@ -64,6 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     register.add_argument("--load", type=int, default=0)
     register.add_argument("--allowed-path", action="append", default=[])
     register.add_argument("--forbidden-path", action="append", default=[])
+    register.add_argument("--role", action="append", default=[], help="Agent role (arch/core/crud/test/review). Repeatable.")
 
     discover = subcommands.add_parser("discover", help="Discover agents by capability")
     discover.add_argument("--db", default=_cli_db_arg())
@@ -87,6 +88,7 @@ def _build_parser() -> argparse.ArgumentParser:
     submit.add_argument("--custom-command", action="append", default=[], help="Custom verification commands for test contract (repeatable)")
     submit.add_argument("--custom-evidence", action="append", default=[], help="Custom evidence names for test contract (repeatable)")
     submit.add_argument("--spec-json", help="Structured spec as JSON string (stored in task.metadata.spec)")
+    submit.add_argument("--required-role", help="Role required to claim this task (arch/core/crud/test/review)")
 
     status = subcommands.add_parser("status", help="Print task status")
     status.add_argument("--db", default=_cli_db_arg())
@@ -279,6 +281,10 @@ def _build_parser() -> argparse.ArgumentParser:
     dashboard = subcommands.add_parser("dashboard", help="Show project overview: plans, tasks, agents, conflicts, metrics")
     dashboard.add_argument("--db", default=_cli_db_arg())
 
+    kanban = subcommands.add_parser("kanban", help="Show four-color kanban board (red/yellow/green/done)")
+    kanban.add_argument("--db", default=_cli_db_arg())
+    kanban.add_argument("--json", action="store_true", help="Output as machine-readable JSON")
+
     next_cmd = subcommands.add_parser(
         "next", help="Claim + start the next ready task and print its worker packet"
     )
@@ -321,6 +327,7 @@ def _build_parser() -> argparse.ArgumentParser:
     claim.add_argument("--capability", required=True)
     claim.add_argument("--project-context")
     claim.add_argument("--best-effort", action="store_true")
+    claim.add_argument("--role", help="Role filter (arch/core/crud/test/review)")
 
     run_once = subcommands.add_parser("run-once", help="Run one local agent adapter cycle")
     run_once.add_argument("--db", default=_cli_db_arg())
@@ -547,6 +554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             project_context=args.project_context,
             allowed_paths=args.allowed_path,
             forbidden_paths=args.forbidden_path,
+            roles=list(args.role) if hasattr(args, "role") and args.role else [],
         )
         registry.register(card)
         _print_json({"agent_id": card.agent_id, "status": "registered"})
@@ -600,6 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ) if args.risk else None,
             plan_id=args.plan_id,
             depends_on=args.depends_on,
+            required_role=getattr(args, "required_role", None),
             metadata=metadata,
         )
         registry = Registry(SQLiteStorage(Path(args.db)))
@@ -1058,6 +1067,51 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return 0
 
+    if args.command == "kanban":
+        import json as _json
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        reg = Registry(SQLiteStorage(Path(args.db)))
+        board = reg.get_kanban()
+
+        if args.json:
+            _print_json(board)
+            return 0
+
+        # Pretty-print the kanban board
+        def _color(c: str) -> str:
+            return {"red": "🔴", "yellow": "🟡", "green": "🟢", "done": "✅"}.get(c, "")
+
+        print("MAC Kanban")
+        print("=" * 50)
+        for color_key, color_label in [("red", "待写"), ("yellow", "进行中"), ("green", "待审")]:
+            section = board[color_key]
+            print(f"\n{_color(color_key)} {color_label} ({section['count']}):")
+            if section["tasks"]:
+                for t in section["tasks"]:
+                    role_tag = f" [{t.get('required_role', '')}]" if t.get("required_role") else ""
+                    if color_key == "red":
+                        blocked_tag = " [BLOCKED]" if not t.get("dependencies_ok") else ""
+                        print(f"  {t['task_id']}: {t['title'][:50]}{role_tag} (pri:{t['priority']}){blocked_tag}")
+                    elif color_key == "yellow":
+                        agent = t.get("agent_id", "?")
+                        print(f"  {t['task_id']}: {t['title'][:50]}{role_tag} [{agent}]")
+                    else:
+                        agent = t.get("agent_id", "?")
+                        print(f"  {t['task_id']}: {t['title'][:50]} [{agent}]")
+            else:
+                print("  (none)")
+
+        done = board["done"]
+        print(f"\n✅ 今日已完成 ({done['total']}):")
+        if done["by_agent"]:
+            for agent, count in sorted(done["by_agent"].items(), key=lambda x: -x[1]):
+                print(f"  {agent}: {count}")
+        else:
+            print("  (none)")
+        return 0
+
     if args.command == "next":
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
@@ -1117,6 +1171,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             capability=args.capability,
             project_context=args.project_context,
             best_effort=args.best_effort,
+            role=getattr(args, "role", None),
         )
         _print_json(task.model_dump(mode="json") if task is not None else None)
         return 0

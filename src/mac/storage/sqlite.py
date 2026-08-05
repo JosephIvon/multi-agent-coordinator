@@ -474,6 +474,44 @@ class SQLiteTaskLedger:
         rows = self._fetch_all(f"SELECT payload FROM blockers {where} ORDER BY updated_at DESC", *params)
         return [_from_dict("BlockerRecord", json.loads(row["payload"])) for row in rows]
 
+    # ── Facts (Phase E: cross-IDE memory) ─────────────────────────
+
+    def save_fact(self, key: str, value: str, category: str = "general") -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """INSERT INTO facts (key, value, category, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                   value = excluded.value, category = excluded.category,
+                   updated_at = excluded.updated_at""",
+                (key, value, category, now, now),
+            )
+
+    def get_fact(self, key: str) -> dict[str, Any] | None:
+        rows = self._fetch_all("SELECT key, value, category, updated_at FROM facts WHERE key = ?", key)
+        if not rows:
+            return None
+        return dict(rows[0])
+
+    def search_facts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search facts by query across key, value, and category.
+        An empty query returns the most recent facts."""
+        if not query or not query.strip():
+            rows = self._fetch_all(
+                "SELECT key, value, category, updated_at FROM facts ORDER BY updated_at DESC LIMIT ?",
+                limit,
+            )
+        else:
+            pattern = f"%{query}%"
+            rows = self._fetch_all(
+                """SELECT key, value, category, updated_at FROM facts
+                   WHERE key LIKE ? OR value LIKE ? OR category LIKE ?
+                   ORDER BY updated_at DESC LIMIT ?""",
+                pattern, pattern, pattern, limit,
+            )
+        return [dict(r) for r in rows]
+
     def _initialize(self) -> None:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
@@ -619,6 +657,14 @@ class SQLiteTaskLedger:
                     payload TEXT NOT NULL, updated_at TEXT NOT NULL
                 )"""
             )
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS facts (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, category TEXT NOT NULL DEFAULT 'general',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                )"""
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_category ON facts(category)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_updated ON facts(updated_at DESC)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON sessions(agent_id, task_id, status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_blockers_task ON blockers(task_id, status)")
             conn.execute(

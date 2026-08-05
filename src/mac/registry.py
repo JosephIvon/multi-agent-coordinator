@@ -329,10 +329,20 @@ class Registry:
         )
 
     def accept_handoff(self, task_id: str, agent_id: str) -> TaskTransfer:
-        return self._transition(task_id, "accepted", expected_status="proposed", agent_id=agent_id, action="accept_handoff")
+        task = self._transition(task_id, "accepted", expected_status="proposed", agent_id=agent_id, action="accept_handoff")
+        # D: stamp claim time for lease expiry
+        if task.lease_seconds > 0:
+            task.claimed_at = _now_id()
+            self.ledger.save_task_transfer(task)
+        return task
 
     def start_task(self, task_id: str, agent_id: str) -> TaskTransfer:
-        return self._transition(task_id, "running", expected_status="accepted", agent_id=agent_id, action="start_task")
+        task = self._transition(task_id, "running", expected_status="accepted", agent_id=agent_id, action="start_task")
+        # D: stamp claim time on start if not already set from accept
+        if task.lease_seconds > 0 and not task.claimed_at:
+            task.claimed_at = _now_id()
+            self.ledger.save_task_transfer(task)
+        return task
 
     def reject_handoff(self, task_id: str, agent_id: str, reason: str) -> TaskTransfer:
         return self._transition(
@@ -484,6 +494,138 @@ class Registry:
                     expired.append(failed)
         return expired
 
+    # ── Phase D: per-attempt lease expiry (timebox) ──────────────
+
+    def expire_task_leases(
+        self, *, now: float | None = None, auto_retry: bool = False
+    ) -> list[TaskTransfer]:
+        """Release tasks whose per-attempt lease has expired.
+
+        Scans tasks in ``accepted`` or ``running`` status whose
+        ``claimed_at + lease_seconds`` precedes ``now``. Only tasks
+        with ``lease_seconds > 0`` are considered.
+
+        When ``auto_retry=True`` and the task has retries remaining, the
+        task is reset to ``proposed`` (auto-rollback). Otherwise the task
+        is failed with ``error_code='LEASE_EXPIRED'``.
+
+        Like ``expire_stale_tasks``, this does not run a background thread;
+        callers (CLI, cron) invoke it periodically.
+        """
+        checkpoint = now if now is not None else time.time()
+        candidates: list[TaskTransfer] = []
+        for status in ("accepted", "running"):
+            candidates.extend(self.ledger.list_task_transfers(status=status))
+        expired: list[TaskTransfer] = []
+        for task in candidates:
+            if task.lease_seconds <= 0:
+                continue
+            if not task.claimed_at:
+                continue
+            claimed_epoch = _parse_iso_to_epoch(task.claimed_at)
+            if claimed_epoch is None:
+                continue
+            if (checkpoint - claimed_epoch) > task.lease_seconds:
+                if auto_retry and task.retry_count < self.policy.max_retry_count:
+                    task.retry_count += 1
+                    task.error_code = None
+                    task.target_agent_id = task.fallback_agent_id
+                    task.claimed_at = ""
+                    task.updated_at = _now_id()
+                    previous_status = task.status
+                    task.status = "proposed"
+                    self.ledger.save_task_transfer(task)
+                    self._audit(
+                        task, "lease_expire_retry", "system",
+                        from_status=previous_status, to_status="proposed",
+                        message=f"Auto-release: lease expired ({task.lease_seconds}s)",
+                    )
+                    self._publish(
+                        task, "task_retried", actor="system",
+                        from_status=previous_status, to_status="proposed",
+                        payload={"retry_count": task.retry_count, "trigger": "lease_expiry"},
+                    )
+                    expired.append(task)
+                else:
+                    failed = self.fail_task(
+                        task.task_id,
+                        agent_id="system",
+                        error_code="LEASE_EXPIRED",
+                        message=f"Task lease of {task.lease_seconds}s expired in state {task.status!r}.",
+                    )
+                    expired.append(failed)
+        return expired
+
+    # ── Phase C-3: kanban board ──────────────────────────────────
+
+    def get_kanban(self) -> dict[str, Any]:
+        """Return a four-color kanban board grouping tasks by stage.
+
+        - ``red``: proposed tasks waiting to be written (status=proposed)
+        - ``yellow``: tasks in progress (status=accepted or running)
+        - ``green``: tasks awaiting review (status=review_ready)
+        - ``done``: completed today (status=completed, with counts by agent)
+        """
+        all_tasks = self.ledger.list_task_transfers()
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        def _is_today(ts: str) -> bool:
+            return ts.startswith(today)
+
+        red: list[dict[str, Any]] = []
+        yellow: list[dict[str, Any]] = []
+        green: list[dict[str, Any]] = []
+        done_agents: dict[str, int] = {}
+
+        for task in all_tasks:
+            if task.status == "proposed":
+                deps_ok = self._dependencies_satisfied(task)
+                red.append({
+                    "task_id": task.task_id,
+                    "title": task.title or task.description or task.task_id,
+                    "capability": _required_capability(task),
+                    "required_role": task.required_role,
+                    "dependencies_ok": deps_ok,
+                    "priority": task.priority,
+                })
+            elif task.status in ("accepted", "running"):
+                yellow.append({
+                    "task_id": task.task_id,
+                    "title": task.title or task.description or task.task_id,
+                    "status": task.status,
+                    "agent_id": task.target_agent_id,
+                    "capability": _required_capability(task),
+                    "required_role": task.required_role,
+                })
+            elif task.status == "review_ready":
+                green.append({
+                    "task_id": task.task_id,
+                    "title": task.title or task.description or task.task_id,
+                    "agent_id": task.target_agent_id,
+                    "capability": _required_capability(task),
+                })
+            elif task.status == "completed" and _is_today(task.updated_at or task.created_at):
+                agent = task.target_agent_id or "unknown"
+                done_agents[agent] = done_agents.get(agent, 0) + 1
+
+        return {
+            "red": {"label": "待写", "count": len(red), "tasks": red},
+            "yellow": {"label": "进行中", "count": len(yellow), "tasks": yellow},
+            "green": {"label": "待审", "count": len(green), "tasks": green},
+            "done": {"label": "今日已完成", "by_agent": done_agents, "total": sum(done_agents.values())},
+        }
+
+    # ── Phase E: cross-IDE memory (facts) ─────────────────────────
+
+    def remember_fact(self, key: str, value: str, category: str = "general") -> dict[str, Any]:
+        """Store a fact in the coordination ledger for cross-IDE recall."""
+        self.ledger.save_fact(key, value, category)
+        return {"key": key, "category": category, "stored": True}
+
+    def recall_facts(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """Search facts by query. Empty query returns most recent."""
+        return self.ledger.search_facts(query, limit)
+
     def expire_stale_agents(
         self, *, timeout_seconds: int | None = None, now: float | None = None
     ) -> list[Any]:
@@ -610,6 +752,8 @@ class Registry:
         enforce_boundaries: bool = False,
         guarded_patterns: list[str] | None = None,
         refuse_on_blocking: bool = False,
+        has_changelog: bool = False,
+        met_acceptance_criteria: list[str] | None = None,
     ) -> dict[str, Any]:
         """Finish a task in one step: submit quality evidence, save handoff, and complete (or mark review-ready).
 
@@ -630,6 +774,10 @@ class Registry:
             ConflictRecord for each overlap. Defaults to False to keep
             the hot path cheap; opt in when callers want automatic conflict
             surfacing (e.g. the Multica webhook bridge).
+        :param has_changelog: Whether the agent provided a CHANGELOG entry
+            (C-2 quality gate strengthening). Required for medium/high risk tasks.
+        :param met_acceptance_criteria: Subset of the task's acceptance criteria
+            the agent claims to have met (C-2). Required for high-risk tasks.
         :returns: A summary dict with keys ``status``, ``task_id``,
             ``quality_gate``, and optionally ``review``, ``reason``, and
             ``conflicts`` (only when detect_conflicts=True and the task
@@ -676,11 +824,39 @@ class Registry:
         quality_results = _current_attempt_quality_results(
             task, self.ledger.get_quality_results(task_id),
         )
-        allowed, reason = evaluate_quality_gate(task.test_contract, quality_results)
+        # Collect C-2 metadata for the enhanced quality gate.
+        handoff_obj = handoff
+        diff_lines = sum(
+            int(result.get("diff_lines", 0) or 0)
+            for result in quality_results
+        )
+        acceptance_criteria = list(getattr(task.context, "acceptance_criteria", []) or [])
+        met_acceptance = (
+            list(met_acceptance_criteria)
+            if met_acceptance_criteria is not None
+            else list(getattr(handoff_obj, "met_acceptance_criteria", []) or [])
+            if handoff_obj is not None
+            else None
+        )
+
+        allowed, reason = evaluate_quality_gate(
+            task.test_contract,
+            quality_results,
+            diff_lines=diff_lines,
+            has_changelog=has_changelog,
+            acceptance_criteria=acceptance_criteria if acceptance_criteria else None,
+            met_acceptance_criteria=met_acceptance,
+        )
 
         if not allowed:
+            # C-2: Hard-fail — block the task instead of returning soft status.
+            self.block_task(
+                task_id,
+                agent_id=agent_id,
+                reason=f"quality_gate_failed:{reason or 'unknown'}",
+            )
             return {
-                "status": "running",
+                "status": "blocked",
                 "task_id": task_id,
                 "quality_gate": "failed",
                 "reason": reason,
@@ -904,6 +1080,7 @@ class Registry:
         agent_id: str | None = None,
         capability: str | None = None,
         project_context: str | None = None,
+        role: str | None = None,
     ) -> list[TaskTransfer]:
         tasks = self.ledger.list_task_transfers(status="proposed", project_context=project_context)
         ready = []
@@ -911,6 +1088,8 @@ class Registry:
             if agent_id is not None and task.target_agent_id is not None and task.target_agent_id != agent_id:
                 continue
             if capability is not None and _required_capability(task) != capability:
+                continue
+            if role is not None and task.required_role is not None and task.required_role != role:
                 continue
             if not self._dependencies_satisfied(task):
                 continue
@@ -1392,14 +1571,32 @@ class Registry:
         capability: str,
         project_context: str | None = None,
         best_effort: bool = False,
+        role: str | None = None,
     ) -> TaskTransfer | None:
         tasks = self.ledger.list_task_transfers(status="proposed", project_context=project_context)
+        # Load agent card once for role check
+        agent = self.get_agent(agent_id)
+        agent_roles: list[str] = list(getattr(agent, "roles", []) or []) if agent is not None else []
+        # If caller explicitly specifies a role, use it for filtering;
+        # otherwise, try to match agent's roles against task's required_role.
         candidates = []
         for index, task in enumerate(tasks):
             if task.target_agent_id is not None and task.target_agent_id != agent_id:
                 continue
             if not self._dependencies_satisfied(task):
                 continue
+            # ── Role gate ──────────────────────────────────────────
+            if role is not None:
+                # Caller specified a role: task must either have no required_role
+                # (open to all) OR match the caller's specified role.
+                if task.required_role is not None and task.required_role != role:
+                    continue
+            elif task.required_role is not None:
+                # No explicit role from caller: check if agent's roles include
+                # the task's required_role.
+                if task.required_role not in agent_roles:
+                    continue
+            # ── Capability gate ─────────────────────────────────────
             required_capability = _required_capability(task)
             if not best_effort and required_capability != capability:
                 continue
@@ -1430,6 +1627,9 @@ class Registry:
                 continue
             claimed.target_agent_id = agent_id
             claimed.updated_at = _now_id()
+            # D: stamp claim time for lease expiry
+            if claimed.lease_seconds > 0:
+                claimed.claimed_at = _now_id()
             self.ledger.save_task_transfer(claimed)
             self._publish(
                 claimed,
