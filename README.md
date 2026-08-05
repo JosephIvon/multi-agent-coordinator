@@ -202,7 +202,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (16)
+### Available Tools (30)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -222,13 +222,29 @@ claude mcp add mac -- mac-mcp-server
 | `mac_expire_stale_tasks` | Expire non-terminal tasks past TTL → failed | write |
 | `mac_expire_stale_agents` | Set offline agents with stale heartbeats | write |
 | `mac_cleanup_tasks` | Delete terminal tasks (failed/cancelled/rejected/superseded) | write |
+| `mac_get_task` | Get full task details by ID | read-only |
+| `mac_retry_task` | Retry a failed task → proposed | write |
+| `mac_resume_blocked_task` | Resume a blocked task → proposed (quality gate recovery) | write |
+| `mac_cancel_task` | Cancel a task (terminal) | write |
+| `mac_expire_task_leases` | Release expired per-attempt timebox leases | write |
+| `mac_list_agents` | List all registered agents (optionally filter by status) | read-only |
+| `mac_block_task` | Block a running task with reason | write |
+| `mac_list_scorers` | List registered scoring functions | read-only |
+| `mac_set_scorer` | Set active scoring function by name | write |
+| `mac_test_scorer` | Test a scorer against proposed tasks | read-only |
+| `mac_search_vault` | Full-text search Obsidian vault | read-only |
+| `mac_save_to_vault` | Create/update note in Obsidian vault | write |
+| `mac_remember` | Store cross-session fact in MAC ledger | write |
+| `mac_recall` | Search facts by query (empty = recent 10) | read-only |
 
-### Available Resources (2)
+### Available Resources (4)
 
 | URI | Description |
 |-----|-------------|
 | `mac://capabilities` | Agent capability registry |
 | `mac://health` | Health summary (open tasks, inflight agents) |
+| `mac://kanban` | Four-color board: red/yellow/green/done |
+| `mac://session-context` | Full project snapshot: kanban + facts + agents + conflicts |
 
 ---
 
@@ -336,7 +352,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (26 tools + 4 resources)
+  mcp_server.py      MCP Server (30 tools + 4 resources)
 ```
 
 ---

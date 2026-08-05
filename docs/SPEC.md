@@ -585,9 +585,9 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (26)
+### Tools (30)
 
-#### Task Coordination (12)
+#### Task Coordination (10)
 | Tool | Function |
 |------|----------|
 | `mac_next_task` | Atomic: claim_next → start → worker_packet |
@@ -600,16 +600,24 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_list_ready_tasks` | List dependency-ready proposed tasks |
 | `mac_review_packet` | Generate review packet |
 | `mac_worker_packet` | Generate worker packet |
+
+#### Review Lifecycle (3)
+| Tool | Function |
+|------|----------|
 | `mac_mark_review_ready` | running → review_ready |
 | `mac_accept_review` | review_ready → completed |
 | `mac_reject_review` | review_ready → rejected |
 
-#### Maintenance (3)
+#### Maintenance & Lifecycle (7)
 | Tool | Function |
 |------|----------|
 | `mac_expire_stale_tasks` | Expire tasks past TTL |
 | `mac_expire_stale_agents` | Mark stale agents offline |
 | `mac_cleanup_tasks` | Delete terminal tasks |
+| `mac_get_task` | Get task details by ID |
+| `mac_retry_task` | Retry a failed task → proposed |
+| `mac_resume_blocked_task` | Resolve blocker → proposed |
+| `mac_cancel_task` | Cancel a task (terminal) |
 
 #### Scoring (3)
 | Tool | Function |
@@ -626,12 +634,11 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_remember` | Store cross-session fact in MAC ledger |
 | `mac_recall` | Recall facts by query |
 
-#### Lease Management (4)
+#### Lease Management (3)
 | Tool | Function |
 |------|----------|
 | `mac_expire_task_leases` | Auto-release or fail expired lease tasks |
 | `mac_list_agents` | List registered agents |
-| `mac_get_task` | Get task details by ID |
 | `mac_block_task` | Block a running task with reason |
 
 ### Resources (4)

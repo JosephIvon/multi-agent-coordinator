@@ -115,7 +115,9 @@ def _long_registry() -> Registry:
 
 
 # ---------------------------------------------------------------------------
-# Tools (26 across 5 categories: 12 task + 3 maintenance + 3 scoring + 4 knowledge + 4 lease)
+# Tools (30 across 6 categories: 10 task + 3 review + 6 maintenance + 4 knowledge + 3 lease + 3 scoring + 1 lifecycle)
+# v1.2.0 final: added mac_get_task, mac_resume_blocked_task, mac_retry_task,
+# mac_expire_task_leases, mac_list_agents, mac_block_task
 # ---------------------------------------------------------------------------
 
 
@@ -277,6 +279,25 @@ def mac_fail_task(
 
     def _do() -> Any:
         return _registry().fail_task(task_id, agent_id, error_code, message)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_cancel_task(task_id: str, agent_id: str, reason: str = "") -> str:
+    """Cancel a task.
+
+    Cancels a task that is no longer needed. Canceled tasks are terminal
+    and cannot be re-claimed.
+
+    :param task_id: ID of the task to cancel.
+    :param agent_id: ID of the agent requesting cancellation.
+    :param reason: Optional reason for cancellation.
+    :returns: JSON of the canceled TaskTransfer.
+    """
+
+    def _do() -> Any:
+        return _registry().cancel_task(task_id, agent_id=agent_id, reason=reason)
 
     return _safe_call(_do)
 
@@ -527,8 +548,125 @@ def mac_cleanup_tasks(
     return _safe_call(_do)
 
 
+@mcp.tool()
+def mac_list_agents(status: str = "online") -> str:
+    """List all registered agents, optionally filtered by status.
+
+    :param status: Filter by agent status — ``online``, ``offline``, or ``all`` (default: ``online``).
+    :returns: JSON array of AgentCard dicts.
+    """
+
+    def _do() -> Any:
+        agents = _registry().discover()
+        if status != "all":
+            agents = [a for a in agents if a.status == status]
+        return agents
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_block_task(task_id: str, agent_id: str, reason: str, handoff_to: str | None = None) -> str:
+    """Block a running task with a reason.
+
+    Used when an agent encounters a blocking issue it cannot resolve (e.g.,
+    missing dependency, need external decision). The task moves to ``blocked``
+    status and can be resumed later with ``mac_resume_blocked_task``.
+
+    :param task_id: The task to block.
+    :param agent_id: The agent requesting the block.
+    :param reason: Why the task is being blocked (required).
+    :param handoff_to: Optional agent ID to hand the blocked task to.
+    :returns: JSON of the blocked TaskTransfer.
+    """
+
+    def _do() -> Any:
+        return _registry().block_task(
+            task_id, agent_id=agent_id, reason=reason, handoff_to=handoff_to
+        )
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_get_task(task_id: str) -> str:
+    """Get a task by ID. Returns the full TaskTransfer as JSON.
+
+    :param task_id: The task ID to look up.
+    :returns: JSON of the TaskTransfer, or an error if not found.
+    """
+
+    def _do() -> Any:
+        task = _registry().get_task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        return task
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_resume_blocked_task(task_id: str, agent_id: str, resolution: str = "") -> str:
+    """Resume a blocked task back to proposed so it can be re-claimed.
+
+    After a quality gate hard-fail (C-2), the task is in ``blocked`` status with
+    ``error_code="TASK_BLOCKED"``.  Call this tool to clear the blocker and reset
+    the task to ``proposed``, then re-claim with ``mac_claim_task`` or
+    ``mac_next_task``.
+
+    :param task_id: The blocked task to resume.
+    :param agent_id: The agent requesting the resume.
+    :param resolution: Optional note describing how the blocker was resolved.
+    :returns: JSON of the resumed TaskTransfer (status=proposed).
+    """
+
+    def _do() -> Any:
+        return _registry().resume_blocked_task(task_id, agent_id=agent_id, resolution=resolution)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_retry_task(task_id: str, agent_id: str, fallback_agent_id: str | None = None) -> str:
+    """Retry a failed task by resetting it to proposed.
+
+    The task's ``retry_count`` is incremented and it can be re-claimed by any
+    eligible agent.  Use ``fallback_agent_id`` to route the retry to a different
+    agent than the original.
+
+    :param task_id: The failed task to retry.
+    :param agent_id: The agent requesting the retry.
+    :param fallback_agent_id: Optional alternative agent to target.
+    :returns: JSON of the reset TaskTransfer (status=proposed).
+    """
+
+    def _do() -> Any:
+        return _registry().retry_task(task_id, agent_id=agent_id, fallback_agent_id=fallback_agent_id)
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_expire_task_leases(auto_retry: bool = False) -> str:
+    """Expire tasks whose per-attempt lease has elapsed.
+
+    Scans ``accepted`` and ``running`` tasks where ``lease_seconds > 0`` and
+    ``(now - claimed_at) > lease_seconds``.  If ``auto_retry`` is True and the
+    task has remaining retries, it is reset to ``proposed``; otherwise it is
+    transitioned to ``failed`` with ``error_code="LEASE_EXPIRED"``.
+
+    :param auto_retry: If True, auto-retry tasks with remaining retries.
+    :returns: JSON array of expired TaskTransfer objects.
+    """
+
+    def _do() -> Any:
+        return _registry().expire_task_leases(auto_retry=auto_retry)
+
+    return _safe_call(_do)
+
+
 # ---------------------------------------------------------------------------
-# Resources (3)
+# Resources (4)
 # ---------------------------------------------------------------------------
 
 

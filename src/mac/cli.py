@@ -338,6 +338,42 @@ def _build_parser() -> argparse.ArgumentParser:
     run_once.add_argument("--timeout", type=float, default=60)
     run_once.add_argument("--command", dest="run_command", nargs=argparse.REMAINDER, required=True)
 
+    remember = subcommands.add_parser("remember", help="Store a cross-IDE fact (visible to all agents)")
+    remember.add_argument("--db", default=_cli_db_arg())
+    remember.add_argument("key", help="Fact key")
+    remember.add_argument("value", help="Fact value")
+    remember.add_argument("--category", default="general", help="Fact category (default: general)")
+
+    recall = subcommands.add_parser("recall", help="Search cross-IDE facts by query")
+    recall.add_argument("--db", default=_cli_db_arg())
+    recall.add_argument("query", nargs="?", default="", help="Search query (empty = recent 10)")
+    recall.add_argument("--limit", type=int, default=10, help="Max results (default: 10)")
+
+    get_task = subcommands.add_parser("get-task", help="Get a single task by ID")
+    get_task.add_argument("--db", default=_cli_db_arg())
+    get_task.add_argument("task_id", help="Task ID to retrieve")
+
+    expire_leases = subcommands.add_parser("expire-task-leases", help="Expire tasks whose per-attempt lease has elapsed")
+    expire_leases.add_argument("--db", default=_cli_db_arg())
+    expire_leases.add_argument("--auto-retry", action="store_true", help="Auto-retry tasks with retries remaining")
+
+    resume_blocked = subcommands.add_parser("resume-blocked", help="Resume a blocked task back to proposed")
+    resume_blocked.add_argument("--db", default=_cli_db_arg())
+    resume_blocked.add_argument("task_id", help="Task ID to resume")
+    resume_blocked.add_argument("--agent-id", required=True)
+    resume_blocked.add_argument("--resolution", default="", help="Description of what was fixed")
+
+    block = subcommands.add_parser("block", help="Block a running task")
+    block.add_argument("--db", default=_cli_db_arg())
+    block.add_argument("task_id", help="Task ID to block")
+    block.add_argument("--agent-id", required=True)
+    block.add_argument("--reason", required=True, help="Why the task is being blocked")
+    block.add_argument("--handoff-to", help="Agent ID to hand off to")
+
+    list_agents = subcommands.add_parser("list-agents", help="List all registered agents")
+    list_agents.add_argument("--db", default=_cli_db_arg())
+    list_agents.add_argument("--status", default="online", help="Filter by status (default: online)")
+
     return parser
 
 
@@ -1196,6 +1232,87 @@ def main(argv: Sequence[str] | None = None) -> int:
         runner = template.create_runner(registry=registry)
         task = runner.run_once()
         _print_json(task.model_dump(mode="json") if task is not None else None)
+        return 0
+
+    if args.command == "remember":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        fact = Registry(SQLiteStorage(Path(args.db))).remember_fact(
+            key=args.key,
+            value=args.value,
+            category=args.category,
+        )
+        _print_json(fact)
+        return 0
+
+    if args.command == "recall":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        facts = Registry(SQLiteStorage(Path(args.db))).recall_facts(
+            query=args.query,
+            limit=args.limit,
+        )
+        _print_json(facts)
+        return 0
+
+    if args.command == "get-task":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        task = Registry(SQLiteStorage(Path(args.db))).get_task(args.task_id)
+        _print_json(task.model_dump(mode="json") if task is not None else None)
+        return 0 if task is not None else 1
+
+    if args.command == "expire-task-leases":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        auto_retry = getattr(args, "auto_retry", False)
+        expired = Registry(SQLiteStorage(Path(args.db))).expire_task_leases(auto_retry=auto_retry)
+        if expired:
+            for task in expired:
+                action = "Retried" if task.status == "proposed" else "Expired"
+                logger.info("%s: %s (%s)", action, task.task_id, task.status)
+        else:
+            logger.info("No lease-expired tasks found.")
+        _print_json({"expired_count": len(expired), "tasks": [t.model_dump(mode="json") for t in expired]})
+        return 0
+
+    if args.command == "resume-blocked":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        task = Registry(SQLiteStorage(Path(args.db))).resume_blocked_task(
+            args.task_id,
+            agent_id=args.agent_id,
+            resolution=args.resolution,
+        )
+        _print_json(task.model_dump(mode="json"))
+        return 0
+
+    if args.command == "block":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        task = Registry(SQLiteStorage(Path(args.db))).block_task(
+            args.task_id,
+            agent_id=args.agent_id,
+            reason=args.reason,
+            handoff_to=getattr(args, "handoff_to", None),
+        )
+        _print_json(task.model_dump(mode="json"))
+        return 0
+
+    if args.command == "list-agents":
+        from mac.registry import Registry
+        from mac.storage.sqlite import SQLiteStorage
+
+        agents = Registry(SQLiteStorage(Path(args.db))).discover()
+        if args.status != "all":
+            agents = [a for a in agents if a.status == args.status]
+        _print_json([a.model_dump(mode="json") for a in agents])
         return 0
 
     raise AssertionError(f"Unhandled command: {args.command}")

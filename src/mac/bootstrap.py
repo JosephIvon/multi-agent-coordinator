@@ -47,11 +47,11 @@ _COMMON_WORKFLOW = """
 ## Core MCP Tools
 | Category | Tools |
 |----------|-------|
-| Task | mac_next_task, mac_done, mac_submit_task, mac_claim_task, mac_fail_task, mac_save_handoff, mac_list_ready_tasks, mac_worker_packet, mac_review_packet |
+| Task | mac_next_task, mac_done, mac_submit_task, mac_claim_task, mac_fail_task, mac_save_handoff, mac_list_ready_tasks, mac_worker_packet, mac_review_packet, mac_record_quality_and_complete |
 | Review | mac_mark_review_ready, mac_accept_review, mac_reject_review |
-| Maintenance | mac_expire_stale_tasks, mac_expire_stale_agents, mac_cleanup_tasks |
+| Maintenance | mac_expire_stale_tasks, mac_expire_stale_agents, mac_cleanup_tasks, mac_get_task, mac_retry_task, mac_resume_blocked_task, mac_cancel_task |
 | Knowledge | mac_remember, mac_recall, mac_search_vault, mac_save_to_vault |
-| Lease | mac_expire_task_leases, mac_list_agents, mac_get_task, mac_block_task |
+| Lease | mac_expire_task_leases, mac_list_agents, mac_block_task |
 | Scoring | mac_list_scorers, mac_set_scorer, mac_test_scorer |
 | Resources | mac://kanban, mac://session-context, mac://capabilities, mac://health |
 
@@ -120,7 +120,7 @@ _MCP_CONFIG = {
             "command": "mac-mcp-server",
             "args": [],
             "env": {"MAC_DB_PATH": "mac.db"},
-            "description": "MAC coordination ledger — 26 tools + 4 resources (v1.2.0)",
+            "description": "MAC coordination ledger — 30 tools + 4 resources (v1.2.0)",
         }
     }
 }
