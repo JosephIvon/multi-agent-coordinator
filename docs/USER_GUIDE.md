@@ -1,6 +1,6 @@
 # MAC 使用手册
 
-> Multi-Agent Coordinator v0.7.0 — 让多个 AI 编码工具在同一项目中协作的本地账本
+> Multi-Agent Coordinator v1.2.0 — 让多个 AI 编码工具在同一项目中协作的本地账本
 
 ---
 
@@ -347,8 +347,38 @@ app = create_app(Registry(SQLiteTaskLedger("mac.db")))
 | `POST` | `/agents/{id}/next` | 一键接活 |
 | `GET` | `/metrics` | 聚合指标 |
 | `POST` | `/tasks/expire-stale` | 过期卡住的任务 |
+| `POST` | `/tasks/expire-leases` | 释放超时时间盒 |
 | `POST` | `/agents/expire-stale` | 下线超时 Agent |
+| `POST` | `/tasks/{id}/blocked` | 阻塞运行中任务 |
+| `POST` | `/tasks/{id}/resume` | 恢复阻塞任务 |
 
 ---
 
-*MAC v0.7.0 使用手册 — 2026-07-23*
+## 12. v1.2.0 新功能速查
+
+### 时间盒租约 (Phase D)
+- 提交任务时设置 `lease_seconds` 限制 Agent 持有时间
+- `expire-task-leases --auto-retry` 自动回滚超时任务到 proposed
+- 租约耗尽 → `error_code="LEASE_EXPIRED"`
+
+### 评分钩子 (C-9)
+- `mac-agent scoring list` 列出注册的评分函数
+- `mac-agent scoring test --name <name>` 测试评分器
+- 支持 sync + async 评分器，带 LRU 缓存
+
+### 扩展生命周期钩子
+- `on_agent_registered`, `on_task_done`, `on_task_blocked`, `on_task_failed`
+- WebSocket 扩展频道：`/ws/{channel}`
+
+### 质量门强化 (C-2)
+- 中/高风险任务需要 `has_changelog` 和 `met_acceptance_criteria`
+- 质量门硬失败 → 任务进入 `blocked` 状态，需 `resume_blocked_task`
+
+### 跨 IDE 知识管理 (Phase E)
+- `mac_remember(key, value, category)` 存储跨会话事实
+- `mac_recall(query)` 搜索事实
+- `mac_search_vault(query)` / `mac_save_to_vault(content)` Obsidian 集成
+
+---
+
+*MAC v1.2.0 使用手册 — 2026-08-05*

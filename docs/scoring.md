@@ -134,11 +134,11 @@ Dry-runs a scorer against the current ledger's proposed tasks without mutating s
 ## CLI Subcommands
 
 ```
-mac-agent scorer list              # List all registered scorers (sync + async)
-mac-agent scorer test --name NAME  # Dry-run a scorer against proposed tasks
+mac-agent scoring list              # List all registered scorers (sync + async)
+mac-agent scoring test --name NAME  # Dry-run a scorer against proposed tasks
 ```
 
-`scorer test` options:
+`scoring test` options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -154,7 +154,9 @@ mac-agent scorer test --name NAME  # Dry-run a scorer against proposed tasks
 ### Load-Aware Scorer
 ```python
 def load_aware(task):
-    penalty = task.retry_count * 0.2 + sum(1 for b in task.blockers if not b.resolved) * 0.5
+    # Blockers are stored in the ledger, not on the task object directly.
+    # Access them via registry.ledger.list_blockers(task_id) when needed.
+    penalty = task.retry_count * 0.2
     return task.priority - penalty
 
 register_scorer("load_aware", load_aware)

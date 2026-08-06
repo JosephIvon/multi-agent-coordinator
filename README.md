@@ -1,6 +1,6 @@
 # Multi-Agent Coordinator (MAC)
 
-**Version:** 1.1.0 | **License:** MIT
+**Version:** 1.2.0 | **License:** MIT
 
 MAC is a lightweight local coordination layer for AI coding agents. It gives multiple agents a shared ledger for tasks, plans, context handoff, quality evidence, conflict records, and review packets.
 
@@ -331,8 +331,7 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 
 - It does not automatically launch external AI tools.
 - It does not stream logs or terminal sessions.
-- It does not provide leases, distributed locks, Redis, Postgres, or cloud sync.
-- It does not implement full review lifecycle states by default.
+- It does not provide Redis, Postgres, or cloud sync.
 - It does not solve conflicts automatically.
 - It does not replace MCP, LangGraph, CrewAI, pytest, or CI.
 
@@ -349,6 +348,11 @@ src/mac/
   runner/            Local one-shot runner adapter and templates
   testing/           TestContract and planner
   transport/         FastAPI adapter
+  adapters/          IDE adapter implementations (generic, HTTP, lifecycle)
+  extensions.py      Plugin API: lifecycle hooks and WebSocket channels
+  scoring.py         Pluggable task scoring (sync + async hooks)
+  schema_extensions.py  Schema extension facade
+  security.py        Security utilities
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
@@ -394,7 +398,7 @@ This keeps one MAC source of truth while allowing new IDE integrations to be add
 ## Production delivery: HTTP, sessions, and IDE bootstrap
 
 ```bash
-pip install "mac-agent[http,mcp]==1.1.0"
+pip install "mac-agent[http,mcp]==1.2.0"
 mac-agent bootstrap --project-root .
 mac-http-server
 ```

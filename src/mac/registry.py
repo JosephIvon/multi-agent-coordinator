@@ -621,6 +621,17 @@ class Registry:
             "done": {"label": "今日已完成", "by_agent": done_agents, "total": sum(done_agents.values())},
         }
 
+    def get_metrics(self) -> dict[str, Any]:
+        """Return aggregate collaboration metrics (6 indicators).
+
+        Delegates to :func:`mac.metrics.compute_metrics` against the
+        Registry's own ledger.  Safe to call from any integration surface
+        (HTTP, MCP, CLI).
+        """
+        from mac.metrics import compute_metrics
+
+        return compute_metrics(self.ledger)
+
     # ── Phase E: cross-IDE memory (facts) ─────────────────────────
 
     def remember_fact(self, key: str, value: str, category: str = "general") -> dict[str, Any]:
@@ -1126,6 +1137,7 @@ class Registry:
         agent_id=None,
         capability=None,
         project_context=None,
+        role: str | None = None,
     ):
         # Async variant of list_ready_tasks (Round 15).
         # No scorer -> returns SQL natural order without any asyncio work.
@@ -1139,6 +1151,8 @@ class Registry:
             if agent_id is not None and task.target_agent_id is not None and task.target_agent_id != agent_id:
                 continue
             if capability is not None and _required_capability(task) != capability:
+                continue
+            if role is not None and task.required_role is not None and task.required_role != role:
                 continue
             if not self._dependencies_satisfied(task):
                 continue

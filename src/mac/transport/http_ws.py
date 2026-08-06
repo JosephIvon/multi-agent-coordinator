@@ -426,6 +426,16 @@ def create_app(registry: Registry, *, token: str | None = None) -> FastAPI:
         """Transition non-terminal tasks past their TTL to failed, or auto-retry."""
         return registry.expire_stale_tasks(auto_retry=auto_retry)
 
+    @app.post("/tasks/expire-leases")
+    def expire_task_leases(auto_retry: bool = False) -> list[TaskTransfer]:
+        """Release tasks whose per-attempt timebox lease has expired.
+
+        With ``auto_retry=True`` and remaining retries, the task is reset to
+        ``proposed``. Without retries or with ``auto_retry=False``, the task
+        is failed with ``error_code="LEASE_EXPIRED"``.
+        """
+        return registry.expire_task_leases(auto_retry=auto_retry)
+
     @app.post("/tasks/cleanup")
     def cleanup_tasks(request: CleanupTasksRequest | None = None) -> list[TaskTransfer]:
         """Delete terminal tasks (failed/cancelled/rejected/superseded)."""

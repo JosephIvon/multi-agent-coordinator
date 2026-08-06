@@ -2,7 +2,7 @@
 
 > Version: v1.2.0 | Base URL: `http://localhost:8765`
 
-MAC exposes 60+ REST endpoints for agent registration, task lifecycle, plans, reviews, sessions, callbacks, and remote dispatch. All endpoints return JSON unless noted otherwise.
+MAC exposes 55+ REST endpoints for agent registration, task lifecycle, plans, reviews, sessions, callbacks, and remote dispatch. All endpoints return JSON unless noted otherwise.
 
 ## Authentication
 
@@ -122,6 +122,9 @@ Preview task readiness. Returns `TaskReadinessReport`.
 
 ### `POST /tasks/expire-stale`
 Expire tasks past TTL. Query param: `auto_retry` (bool, default false).
+
+### `POST /tasks/expire-leases`
+Release tasks whose per-attempt timebox lease has expired. Query param: `auto_retry` (bool, default false). With `auto_retry=true`: resets to `proposed` if retries remain; without: fails with `error_code="LEASE_EXPIRED"`.
 
 ### `POST /tasks/cleanup`
 Delete terminal tasks. **Body**: `{statuses?, plan_id?, older_than_seconds?}`.
