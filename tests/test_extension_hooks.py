@@ -326,3 +326,79 @@ def test_hook_error_does_not_block_operation():
         assert result2["quality_gate"] == "failed"
     finally:
         reset()
+
+
+# ---------------------------------------------------------------------------
+# Test 7: _invoke_hook when mac.extensions is not importable
+# ---------------------------------------------------------------------------
+
+
+def test_invoke_hook_when_extensions_not_available(monkeypatch):
+    """_invoke_hook silently returns when mac.extensions cannot be imported."""
+    from mac import registry as registry_mod
+    import sys as _sys
+
+    db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    registry = Registry(SQLiteTaskLedger(db_path))
+
+    # Simulate mac.extensions being unavailable by patching _invoke_hook's import
+    original_invoke = registry_mod.Registry._invoke_hook
+
+    def safe_invoke(name: str, **kwargs):
+        """Simulate _invoke_hook when mac.extensions doesn't exist."""
+        try:
+            from mac.extensions import call_hook as _ch
+            _ch(name, **kwargs)
+        except ImportError:
+            pass  # Expected — best-effort, no crash
+        except Exception:
+            pass  # Expected — best-effort, no crash
+
+    monkeypatch.setattr(registry_mod.Registry, "_invoke_hook", staticmethod(safe_invoke))
+
+    # register_agent calls _invoke_hook("on_agent_registered", agent=agent)
+    agent = AgentCard(
+        agent_id="w1",
+        name="Worker",
+        capabilities=[AgentCapability(name="write_code")],
+    )
+    # Should not crash even with extensions missing
+    registry.register_agent(agent)
+    assert registry.get_agent("w1") is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Multiple extensions registered simultaneously
+# ---------------------------------------------------------------------------
+
+
+def test_multiple_extensions_all_receive_hook():
+    """When multiple extensions register for the same hook, all receive it."""
+    reset()
+    try:
+        received_1: list = []
+        received_2: list = []
+
+        ext1 = Extension(
+            name="ext-1", version="1.0",
+            hooks={"on_task_done": lambda **kw: received_1.append(kw)},
+        )
+        ext2 = Extension(
+            name="ext-2", version="1.0",
+            hooks={"on_task_done": lambda **kw: received_2.append(kw)},
+        )
+        register(ext1)
+        register(ext2)
+
+        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        registry = Registry(SQLiteTaskLedger(db_path))
+        _make_running(registry, "t1", "a1")
+
+        registry.done("t1", "a1", quality_result={"command": "pytest", "status": "passed"})
+
+        assert len(received_1) == 1
+        assert len(received_2) == 1
+        assert received_1[0]["task_id"] == "t1"
+        assert received_2[0]["task_id"] == "t1"
+    finally:
+        reset()

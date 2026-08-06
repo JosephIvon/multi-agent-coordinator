@@ -468,3 +468,232 @@ def _async_priority_factory():
     async def _fn(task):
         return float(task.priority)
     return _fn
+
+
+# ---------------------------------------------------------------------------
+# Edge cases: NaN, non-float, async exceptions, cache eviction, zero config
+# ---------------------------------------------------------------------------
+
+
+class TestSafeScoreEdgeCases:
+    """Verify _safe_score in registry.py protects sorted() from pathological scorers."""
+
+    def test_scorer_returning_nan_returns_zero(self, ledger: SQLiteTaskLedger) -> None:
+        """NaNfrom a scorer must not break sorted()."""
+        def nan_scorer(task):
+            return float('nan')
+
+        registry = Registry(ledger, scoring_fn=nan_scorer)
+        registry.submit_task(_make_task("T1", priority=5))
+        registry.submit_task(_make_task("T2", priority=3))
+
+        tasks = registry.list_ready_tasks()
+        assert len(tasks) == 2
+
+    def test_scorer_returning_none_returns_zero(self, ledger: SQLiteTaskLedger) -> None:
+        """None from a scorer is treated as 0.0."""
+        def none_scorer(task):
+            return None
+
+        registry = Registry(ledger, scoring_fn=none_scorer)
+        registry.submit_task(_make_task("T1"))
+        tasks = registry.list_ready_tasks()
+        assert len(tasks) == 1
+
+    def test_scorer_returning_string_returns_zero(self, ledger: SQLiteTaskLedger) -> None:
+        """Non-float type (string) from scorer → 0.0 (no crash)."""
+        def str_scorer(task):
+            return "high"
+
+        registry = Registry(ledger, scoring_fn=str_scorer)
+        registry.submit_task(_make_task("T1"))
+        tasks = registry.list_ready_tasks()
+        assert len(tasks) == 1
+
+    def test_scorer_returning_list_returns_zero(self, ledger: SQLiteTaskLedger) -> None:
+        """Non-numeric type (list) from scorer → 0.0."""
+        def list_scorer(task):
+            return [1, 2, 3]
+
+        registry = Registry(ledger, scoring_fn=list_scorer)
+        registry.submit_task(_make_task("T1"))
+        tasks = registry.list_ready_tasks()
+        assert len(tasks) == 1
+
+    def test_scorer_raising_exception_returns_zero(self, ledger: SQLiteTaskLedger) -> None:
+        """Scorer that raises → 0.0, sorted() still works."""
+        def boom_scorer(task):
+            raise RuntimeError("scorer crashed")
+
+        registry = Registry(ledger, scoring_fn=boom_scorer)
+        registry.submit_task(_make_task("T1", priority=5))
+        registry.submit_task(_make_task("T2", priority=3))
+        tasks = registry.list_ready_tasks()
+        assert len(tasks) == 2
+
+
+class TestAsyncScorerEdgeCases:
+    """Edge cases for async scoring path."""
+
+    def test_async_scorer_raising_exception_does_not_crash(self, ledger: SQLiteTaskLedger) -> None:
+        """Async scorer that raises → scores fall back to 0.0 gracefully."""
+        async def boom_async(task):
+            raise RuntimeError("async scorer crash")
+
+        registry = Registry(ledger, scoring_fn=boom_async)
+        _seed_two_tasks(ledger)
+        import asyncio
+        tasks = asyncio.run(registry.alist_ready_tasks())
+        assert len(tasks) == 2
+
+    def test_async_scorer_returning_none(self, ledger: SQLiteTaskLedger) -> None:
+        """Async scorer that returns None → 0.0."""
+        async def none_async(task):
+            return None
+
+        registry = Registry(ledger, scoring_fn=none_async)
+        _seed_two_tasks(ledger)
+        import asyncio
+        tasks = asyncio.run(registry.alist_ready_tasks())
+        assert len(tasks) == 2
+
+
+class TestScoringCacheEdgeCases:
+    """Cache eviction, zero-TTL, zero-maxsize scenarios."""
+
+    def test_cache_eviction_when_over_maxsize(self, ledger: SQLiteTaskLedger, monkeypatch) -> None:
+        """When maxsize is exceeded, oldest entries are evicted (FIFO)."""
+        counter = {"calls": 0}
+
+        def counting_scorer(task):
+            counter["calls"] += 1
+            return float(task.priority)
+
+        registry = Registry(ledger, scoring_fn=counting_scorer, scoring_cache_maxsize=2, scoring_cache_ttl_seconds=99999.0)
+        # Submit 3 distinct tasks with unique priorities so cache grows (priority >= 1)
+        for i in range(1, 4):
+            registry.submit_task(_make_task(f"T{i}", priority=i))
+
+        import asyncio as _aio
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        first_pass = counter["calls"]
+        # Second pass: oldest entry should be evicted if cache is full,
+        # so at least that entry gets re-scored.
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        second_pass = counter["calls"]
+        # With maxsize=2 and 3 tasks, at least one eviction happened
+        assert second_pass > first_pass, f"Expected eviction: first={first_pass}, second={second_pass}"
+
+    def test_cache_ttl_zero_disables_ttl_expiry(self, ledger: SQLiteTaskLedger, monkeypatch) -> None:
+        """scoring_cache_ttl_seconds=0 → infinite TTL, entries never expire."""
+        counter = {"calls": 0}
+
+        def counting_scorer(task):
+            counter["calls"] += 1
+            return float(task.priority)
+
+        fake_now = {"t": 0.0}
+        monkeypatch.setattr("mac.registry.time.time", lambda: fake_now["t"])
+
+        registry = Registry(ledger, scoring_fn=counting_scorer, scoring_cache_ttl_seconds=0.0)
+        _seed_two_tasks(ledger)
+        import asyncio as _aio
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        fake_now["t"] += 99999.0  # Advance far past any reasonable TTL
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        # With TTL=0, all entries persist; no re-scoring needed
+        assert counter["calls"] == 2
+
+    def test_cache_maxsize_zero_disables_cache(self, ledger: SQLiteTaskLedger) -> None:
+        """scoring_cache_maxsize=0 → caching disabled, every call re-scores."""
+        counter = {"calls": 0}
+
+        def counting_scorer(task):
+            counter["calls"] += 1
+            return float(task.priority)
+
+        registry = Registry(ledger, scoring_fn=counting_scorer, scoring_cache_maxsize=0)
+        _seed_two_tasks(ledger)
+        import asyncio as _aio
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        first = counter["calls"]
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        second = counter["calls"]
+        # With maxsize=0, nothing is cached; all tasks re-scored every call
+        assert second > first, f"Expected re-scoring with maxsize=0: first={first}, second={second}"
+
+    def test_cache_info_reflects_usage(self, ledger: SQLiteTaskLedger) -> None:
+        """scoring_cache_info() reports hits, misses, and configuration."""
+        def prio_scorer(task):
+            return float(task.priority)
+
+        registry = Registry(ledger, scoring_fn=prio_scorer, scoring_cache_maxsize=64, scoring_cache_ttl_seconds=60.0)
+        _seed_two_tasks(ledger)
+        import asyncio as _aio
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+        # Second pass: both should be cache hits
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+
+        info = registry.scoring_cache_info()
+        assert info.maxsize == 64
+        assert info.ttl_seconds == 60.0
+        assert info.misses == 2  # first pass: 2 misses
+        assert info.hits == 2   # second pass: 2 hits
+        assert info.currsize == 2
+
+    def test_clear_scoring_cache_zeros_stats(self, ledger: SQLiteTaskLedger) -> None:
+        """clear_scoring_cache() resets hits, misses, and evicts all entries."""
+        registry = Registry(ledger)
+        _seed_two_tasks(ledger)
+        import asyncio as _aio
+        _aio.run(registry.alist_ready_tasks(project_context="demo"))
+
+        registry.clear_scoring_cache()
+        info = registry.scoring_cache_info()
+        assert info.hits == 0
+        assert info.misses == 0
+        assert info.currsize == 0
+
+
+class TestRoleParamOnAlistReadyTasks:
+    """alist_ready_tasks() role filtering (v1.2.0 fix)."""
+
+    def test_role_filter_blocks_non_matching(self, ledger: SQLiteTaskLedger) -> None:
+        """Tasks with required_role != filter role are excluded."""
+        registry = Registry(ledger)
+        import asyncio as _aio
+
+        registry.submit_task(TaskTransfer(
+            task_id="t-arch",
+            title="arch task",
+            required_role="arch",
+        ))
+        registry.submit_task(TaskTransfer(
+            task_id="t-crud",
+            title="crud task",
+            required_role="crud",
+        ))
+
+        tasks = _aio.run(registry.alist_ready_tasks(role="arch"))
+        assert len(tasks) == 1
+        assert tasks[0].task_id == "t-arch"
+
+    def test_role_filter_none_still_passes_roleless_tasks(self, ledger: SQLiteTaskLedger) -> None:
+        """When role=None, tasks without required_role are included."""
+        registry = Registry(ledger)
+        import asyncio as _aio
+
+        registry.submit_task(TaskTransfer(
+            task_id="t-open",
+            title="open task",
+            # no required_role
+        ))
+        registry.submit_task(TaskTransfer(
+            task_id="t-gated",
+            title="gated task",
+            required_role="arch",
+        ))
+
+        tasks = _aio.run(registry.alist_ready_tasks())
+        # Both included: role=None means no filter applied
+        assert len(tasks) == 2

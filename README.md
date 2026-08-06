@@ -304,6 +304,54 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 
 ---
 
+## `done()` — Advanced Parameters
+
+`Registry.done()` is the single entry point for finishing a task: it submits quality evidence, evaluates the quality gate, saves handoff context, and transitions the task to `completed`, `review_ready`, or `blocked`. Beyond the basics, four optional parameters enable advanced safety and conflict detection.
+
+```python
+result = registry.done(
+    task_id="task-1",
+    agent_id="agent-a",
+    quality_result={"command": "pytest -q", "status": "passed"},
+    handoff=HandoffResult(
+        changed_files=["src/auth.py", "src/login.py"],
+        summary="Implement OAuth2 login flow",
+    ),
+    # Advanced (all optional, all default to False/None):
+    enforce_boundaries=True,
+    refuse_on_blocking=True,
+    detect_conflicts=True,
+    guarded_patterns=["src/auth/**", "src/secrets/**"],
+    has_changelog=True,
+    met_acceptance_criteria=["oauth2_flow", "token_refresh"],
+)
+```
+
+### `enforce_boundaries` (bool, default `False`)
+
+When `True`, **refuses to save the handoff** if any `changed_files` fall outside the agent's `allowed_paths`/`forbidden_paths` (configured on the `AgentCard`). Returns a `boundary_violation` result with the task still `running`, so the agent can fix the scope before retrying. Defaults to `False` (soft-block only — the handoff is saved with a warning).
+
+### `refuse_on_blocking` (bool, default `False`)
+
+When `True` and a conflict recorded during this call has `severity="blocking"` (i.e., the file matches a `guarded_patterns` entry), returns a `blocking_conflict` result **without transitioning the task**. The handoff is still saved for review, and the conflict is recorded so the next attempt can address it. Defaults to `False` (informational only — task transitions normally).
+
+### `detect_conflicts` (bool, default `False`)
+
+When `True`, after a successful transition to `completed` or `review_ready`, scans the ledger for other tasks whose `changed_files` overlap with this handoff and records `ConflictRecord` entries for each overlap. Defaults to `False` to keep the hot path cheap; opt in when callers want automatic conflict surfacing (e.g., CI webhook bridges).
+
+### `guarded_patterns` (list[str] | None, default `None`)
+
+A list of glob patterns marking high-risk files. When combined with `refuse_on_blocking=True`, any overlap between the handoff's `changed_files` and these patterns produces a `blocking_conflict` severity. Useful for protecting shared infrastructure code, authentication modules, or database schemas from accidental conflicts.
+
+### C-2 Quality Gate: `has_changelog` and `met_acceptance_criteria`
+
+These two parameters strengthen the quality gate for medium/high-risk `TestContract` tasks:
+
+- **`has_changelog`** (bool, default `False`): Whether the agent provided a `CHANGELOG.md` entry. Required for medium-risk tasks; the quality gate fails (task → `blocked`) if missing.
+- **`met_acceptance_criteria`** (list[str] | None, default `None`): Subset of the task's acceptance criteria the agent claims to have met. Required for high-risk tasks; the gate fails if the intersection is empty.
+
+---
+
 ## What It Can Do
 
 - Coordinate local multi-agent task work through SQLite WAL.
@@ -321,6 +369,8 @@ When `require_review=True`, `complete_task()` is blocked on `running` tasks. Use
 - Task TTL expiry: `expire_stale_tasks()` transitions stale tasks to `failed` with `TTL_EXPIRED`.
 - One-shot `mac-agent next` command: claim + start + output worker packet atomically.
 - One-shot `mac-agent done` command: quality + handoff + complete/review-ready atomically.
+- `done()` advanced parameters: `enforce_boundaries` (hard-refuse path violations), `refuse_on_blocking` (block task on guarded-pattern conflicts), `detect_conflicts` (auto-scan for overlapping changed_files), `guarded_patterns` (glob-based high-risk file protection).
+- C-2 quality gate: `has_changelog` (required for medium-risk tasks) and `met_acceptance_criteria` (required for high-risk tasks).
 - Auto-retry on TTL expiry: `expire_stale_tasks(auto_retry=True)` resets tasks with retries remaining.
 - Agent heartbeat expiry: `expire_stale_agents()` auto-offlines stale agents.
 - `mac-agent dashboard` command: one-command project overview.

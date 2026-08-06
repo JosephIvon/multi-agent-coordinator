@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +14,26 @@ from mac.mcp_server import (
     capabilities_resource,
     health_resource,
     mac_accept_review,
+    mac_block_task,
+    mac_cancel_task,
     mac_claim_task,
+    mac_cleanup_tasks,
+    mac_done,
+    mac_expire_stale_agents,
+    mac_expire_stale_tasks,
+    mac_expire_task_leases,
     mac_fail_task,
+    mac_get_task,
+    mac_list_agents,
     mac_list_ready_tasks,
     mac_mark_review_ready,
+    mac_next_task,
+    mac_recall,
     mac_record_quality_and_complete,
     mac_reject_review,
+    mac_remember,
+    mac_resume_blocked_task,
+    mac_retry_task,
     mac_review_packet,
     mac_save_handoff,
     mac_submit_task,
@@ -690,3 +705,268 @@ class TestStdioE2E:
                 )
                 assert review_result.isError is True
                 assert "state_conflict" in review_result.content[0].text
+
+
+# ---------------------------------------------------------------------------
+# Knowledge tools (Phase E: remember, recall)
+# ---------------------------------------------------------------------------
+
+
+class TestMacRemember:
+    def test_remember_stores_fact_and_returns_confirmation(self) -> None:
+        result = mac_remember(key="arch", value="Use hexagonal", category="design")
+        parsed = json.loads(result)
+        assert parsed["key"] == "arch"
+        assert parsed["stored"] is True
+        assert parsed["category"] == "design"
+
+    def test_remember_default_category_is_general(self) -> None:
+        result = mac_remember(key="tip", value="Always lint first")
+        parsed = json.loads(result)
+        assert parsed["category"] == "general"
+
+
+class TestMacRecall:
+    def test_recall_empty_query_returns_list(self) -> None:
+        mac_remember(key="a", value="One")
+        mac_remember(key="b", value="Two")
+        result = mac_recall(query="", limit=10)
+        parsed = json.loads(result)
+        assert isinstance(parsed, list)
+        assert len(parsed) >= 2
+
+    def test_recall_keyword_search(self) -> None:
+        mac_remember(key="ci-secret", value="Use repo-scoped secrets", category="security")
+        result = mac_recall(query="secret", limit=5)
+        parsed = json.loads(result)
+        found_keys = {f["key"] for f in parsed}
+        assert "ci-secret" in found_keys
+
+    def test_recall_no_match_returns_empty(self) -> None:
+        result = mac_recall(query="zzz-nonexistent-zzz", limit=5)
+        parsed = json.loads(result)
+        assert isinstance(parsed, list)
+
+
+# ---------------------------------------------------------------------------
+# Lease tools (Phase D: expire_task_leases, list_agents, block_task)
+# ---------------------------------------------------------------------------
+
+
+class TestMacExpireTaskLeases:
+    def test_expire_leases_no_expired_returns_empty(self) -> None:
+        result = mac_expire_task_leases(auto_retry=False)
+        parsed = json.loads(result)
+        assert parsed == []
+
+    def test_expire_leases_with_lease_seconds_expires(self, tmp_path: Path) -> None:
+        mac_submit_task(_task_dict(
+            "t-lease",
+            lease_seconds=1,
+        ))
+        # Use the same registry that MCP tools use (via _use_tmp_db fixture)
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("agent-1", "write_code"))
+        reg.accept_handoff("t-lease", "agent-1")
+        reg.start_task("t-lease", "agent-1")
+
+        time.sleep(1.1)
+
+        result = mac_expire_task_leases(auto_retry=True)
+        parsed = json.loads(result)
+        assert len(parsed) == 1
+        assert parsed[0]["task_id"] == "t-lease"
+        assert parsed[0]["retry_count"] == 1
+        assert parsed[0]["status"] == "proposed"
+
+
+class TestMacListAgents:
+    def test_list_agents_returns_list(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        reg.register_agent(_agent("a2", "test"))
+
+        result = mac_list_agents(status="all")
+        parsed = json.loads(result)
+        assert isinstance(parsed, list)
+        assert len(parsed) == 2
+
+    def test_list_agents_filter_by_online(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+
+        result = mac_list_agents(status="online")
+        parsed = json.loads(result)
+        assert isinstance(parsed, list)
+        assert all(a["status"] == "online" for a in parsed)
+
+
+class TestMacBlockTask:
+    def test_block_running_task(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        mac_submit_task(_task_dict("t-block"))
+        reg.accept_handoff("t-block", "a1")
+        reg.start_task("t-block", "a1")
+
+        result = mac_block_task(task_id="t-block", agent_id="a1", reason="Blocked by external dep")
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-block"
+        assert parsed["status"] == "blocked"
+
+    def test_block_task_not_found_raises_error(self) -> None:
+        with pytest.raises(ToolError) as excinfo:
+            mac_block_task(task_id="nonexistent", agent_id="a1", reason="test")
+        assert "not_found" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle tools: get_task, cancel, retry, resume_blocked
+# ---------------------------------------------------------------------------
+
+
+class TestMacGetTask:
+    def test_get_task_returns_full_task(self) -> None:
+        mac_submit_task(_task_dict("t-get"))
+        result = mac_get_task(task_id="t-get")
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-get"
+        assert parsed["status"] == "proposed"
+
+    def test_get_task_not_found_raises_error(self) -> None:
+        with pytest.raises(ToolError) as excinfo:
+            mac_get_task(task_id="nonexistent")
+        assert "not_found" in str(excinfo.value)
+
+
+class TestMacCancelTask:
+    def test_cancel_proposed_task(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        mac_submit_task(_task_dict("t-cancel"))
+
+        result = mac_cancel_task(task_id="t-cancel", agent_id="a1")
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-cancel"
+        assert parsed["status"] == "cancelled"
+
+    def test_cancel_nonexistent_raises_error(self) -> None:
+        with pytest.raises(ToolError):
+            mac_cancel_task(task_id="nonexistent", agent_id="a1")
+
+
+class TestMacRetryTask:
+    def test_retry_failed_task(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        mac_submit_task(_task_dict("t-retry"))
+        reg.accept_handoff("t-retry", "a1")
+        reg.start_task("t-retry", "a1")
+        reg.fail_task("t-retry", "a1", "TEST_FAIL")
+
+        result = mac_retry_task(task_id="t-retry", agent_id="a1")
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-retry"
+        assert parsed["status"] == "proposed"
+        assert parsed["retry_count"] == 1
+
+    def test_retry_nonexistent_raises_error(self) -> None:
+        with pytest.raises(ToolError):
+            mac_retry_task(task_id="nonexistent", agent_id="a1")
+
+
+class TestMacResumeBlockedTask:
+    def test_resume_blocked_task(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        mac_submit_task(_task_dict("t-blocked"))
+        reg.accept_handoff("t-blocked", "a1")
+        reg.start_task("t-blocked", "a1")
+        reg.block_task("t-blocked", agent_id="a1", reason="Need external input")
+
+        result = mac_resume_blocked_task(task_id="t-blocked", agent_id="a1", resolution="Resolved")
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-blocked"
+        assert parsed["status"] == "proposed"
+
+    def test_resume_nonexistent_raises_error(self) -> None:
+        with pytest.raises(ToolError):
+            mac_resume_blocked_task(task_id="nonexistent", agent_id="a1")
+
+
+# ---------------------------------------------------------------------------
+# Maintenance tools: expire_stale_tasks, expire_stale_agents, cleanup
+# ---------------------------------------------------------------------------
+
+
+class TestMacExpireStaleTasks:
+    def test_expire_stale_returns_empty_when_none_expired(self) -> None:
+        result = mac_expire_stale_tasks(auto_retry=False)
+        parsed = json.loads(result)
+        assert parsed == []
+
+
+class TestMacExpireStaleAgents:
+    def test_expire_stale_agents_returns_empty_when_none_stale(self) -> None:
+        result = mac_expire_stale_agents()
+        parsed = json.loads(result)
+        assert parsed == []
+
+
+class TestMacCleanupTasks:
+    def test_cleanup_no_terminal_tasks_returns_empty(self) -> None:
+        result = mac_cleanup_tasks()
+        parsed = json.loads(result)
+        assert parsed == []
+
+
+# ---------------------------------------------------------------------------
+# Critical-path tools: mac_done, mac_next_task
+# ---------------------------------------------------------------------------
+
+
+class TestMacDone:
+    def test_done_completes_task(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("a1", "write_code"))
+        mac_submit_task(_task_dict("t-done-mcp"))
+        reg.accept_handoff("t-done-mcp", "a1")
+        reg.start_task("t-done-mcp", "a1")
+
+        result = mac_done(
+            task_id="t-done-mcp",
+            agent_id="a1",
+            quality_result={"command": "pytest", "status": "passed"},
+        )
+        parsed = json.loads(result)
+        assert parsed["task_id"] == "t-done-mcp"
+        assert parsed["status"] == "completed"
+        assert parsed["quality_gate"] == "passed"
+
+    def test_done_nonexistent_raises_error(self) -> None:
+        with pytest.raises(ToolError):
+            mac_done(
+                task_id="nonexistent",
+                agent_id="a1",
+                quality_result={"command": "pytest", "status": "passed"},
+            )
+
+
+class TestMacNextTask:
+    def test_next_task_no_agents_returns_no_task(self) -> None:
+        """mac_next_task returns error when no agent can claim."""
+        with pytest.raises(ToolError):
+            mac_next_task(agent_id="nobody", capability="write_code")
+
+    def test_next_task_claims_and_starts(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("worker", "write_code"))
+        mac_submit_task(_task_dict("t-next"))
+
+        result = mac_next_task(agent_id="worker", capability="write_code")
+        # Should return a Markdown worker packet
+        assert isinstance(result, str)
+        assert "Worker Task: t-next" in result
+        # The task should now be running
+        parsed = json.loads(mac_get_task(task_id="t-next"))
+        assert parsed["status"] == "running"
