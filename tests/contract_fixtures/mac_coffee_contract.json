@@ -1,0 +1,33 @@
+{
+  "contract_version": "1",
+  "generated_for": "mac-agent (multi-agent-coordinator) Registry surface driven by mac_coffee",
+  "mirror_of": "mac_coffee/tests/contract_fixtures/mac_registry_ok.json",
+  "note": "KEEP IN SYNC with mac_coffee side. mac_coffee.MAC_AGENT_CONTRACT_VERSION must equal this contract_version. A mismatch means a contract drift between the two repos.",
+  "task_transfer_fields": {
+    "task_id": "str",
+    "trace_id": "str",
+    "source_agent_id": "str | None",
+    "target_agent_id": "str | None",
+    "status": "str (proposed|accepted|running|review_ready|completed|failed|cancelled|deleted)",
+    "priority": "int 1..10",
+    "depends_on": "list[str]"
+  },
+  "registry_methods": {
+    "get_task": { "args": ["task_id: str"], "returns": "TaskTransfer | None" },
+    "accept_handoff": { "args": ["task_id: str", "agent_id: str"], "expected_status": "proposed", "returns": "TaskTransfer" },
+    "start_task": { "args": ["task_id: str", "agent_id: str"], "expected_status": "accepted", "returns": "TaskTransfer" },
+    "done": {
+      "args": ["task_id: str", "agent_id: str", "quality_result: dict | None = None", "handoff: HandoffResult | None = None", "detect_conflicts: bool = False", "enforce_boundaries: bool = False", "guarded_patterns: list[str] | None = None", "refuse_on_blocking: bool = False", "has_changelog: bool = False", "met_acceptance_criteria: list[str] | None = None"],
+      "expected_status": "running",
+      "returns": "dict[str, Any]"
+    },
+    "fail_task": { "args": ["task_id: str", "agent_id: str", "error_code: str", "message: str = ''"], "returns": "TaskTransfer" }
+  },
+  "status_mapping": {
+    "ClaimState.OPEN": "proposed",
+    "ClaimState.CLAIMED": "accepted",
+    "ClaimState.IN_PROGRESS": "running",
+    "ClaimState.COMPLETE": "completed",
+    "ClaimState.ROLLED_OVER": "failed"
+  }
+}
