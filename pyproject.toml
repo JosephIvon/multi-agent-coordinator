@@ -68,6 +68,15 @@ mac-http-server = "mac.transport.http_ws:main"
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "--tb=short -q"
+# The StarletteDeprecationWarning below is raised internally by starlette 1.3.x
+# when the `starlette.testclient` module is imported transitively (e.g. via
+# fastapi.testclient). It is emitted by the dependency itself, not by our code,
+# and the advised "install httpx2" switch is a starlette-internal migration that
+# we do not control. Silence it so the suite output stays clean.
+# Tracked for a future dependency refresh: bump fastapi/starlette to drop the alias.
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py310"

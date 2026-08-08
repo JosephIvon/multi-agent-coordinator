@@ -8,11 +8,11 @@
 ## 0. 项目速查
 
 - **定位**:轻量多智能体**协作账本**,不是执行引擎
-- **版本**:1.1.0 | **Python**:≥ 3.10 | **License**:MIT
+- **版本**:1.2.0 | **Python**:≥ 3.10 | **License**:MIT
 - **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
 - **状态机**:`proposed → accepted → running → completed`(另含 `review_ready` / `rejected` / `failed` / `cancelled` / `superseded`;`review_ready` 仅 `require_review=True` 时启用)
-- **测试**:pytest ~251 用例,跑 `python -m pytest tests/ -q`
+- **测试**:pytest 580+ 用例(详见 [`README.md`](README.md)/ [`docs/SPEC.md`](docs/SPEC.md)),跑 `python -m pytest tests/ -q`
 
 ---
 
@@ -28,7 +28,7 @@ src/mac/
 ├── quality/gate.py         # 质量门
 ├── runner/                 # 本地 adapter(命令/Pytest 模板)
 ├── transport/http_ws.py    # FastAPI app(仅 http extra)
-├── mcp_server.py           # MCP Server(16 tools + 2 resources,仅 mcp extra)
+├── mcp_server.py           # MCP Server(30 tools + 4 resources,仅 mcp extra)
 ├── metrics.py              # 可观测性聚合(6 指标)
 ├── events.py               # TaskEventBus
 └── cli.py                  # CLI 子命令
@@ -118,28 +118,64 @@ src/mac/
 
 ## 9. MCP Server 指引
 
-AI 编码工具通过 MCP 接入 MAC,16 tools + 2 resources:
+AI 编码工具通过 MCP 接入 MAC,**30 tools + 4 resources**(与 [`README.md`](README.md) / [`docs/SPEC.md`](docs/SPEC.md) 同步):
+
+**任务生命周期(写)**
 
 | Tool | 作用 | 副作用 |
 |------|------|--------|
-| `mac_next_task` | 认领+启动+输出 worker packet(原子操作) | 写 |
-| `mac_done` | 一键完工:质量证据+交接+完成/审核(自动检测 require_review) | 写 |
 | `mac_submit_task` | 提交任务(完整 TaskTransfer dict) | 写 |
 | `mac_claim_task` | 认领 + 启动任务(原子操作) | 写 |
+| `mac_next_task` | 认领+启动+输出 worker packet(原子操作) | 写 |
 | `mac_record_quality_and_complete` | 提交质量证据 + 闸门通过则自动 complete(旧版,推荐用 mac_done) | 写 |
+| `mac_done` | 一键完工:质量证据+交接+完成/审核(自动检测 require_review) | 写 |
 | `mac_fail_task` | 标记任务失败 | 写 |
+| `mac_cancel_task` | 取消任务(可选原因) | 写 |
 | `mac_save_handoff` | 保存结构化交接 | 写 |
-| `mac_list_ready_tasks` | 列出可认领任务 | 只读 |
-| `mac_review_packet` | 生成 reviewer prompt(Markdown) | 只读 |
-| `mac_worker_packet` | 生成 worker prompt(Markdown,含边界) | 只读 |
-| `mac_mark_review_ready` | running → review_ready(需 require_review=True) | 写 |
-| `mac_accept_review` | review_ready → completed | 写 |
-| `mac_reject_review` | review_ready → rejected(自动记录冲突) | 写 |
-| `mac_expire_stale_tasks` | 过期 TTL 任务 → failed | 写 |
+| `mac_block_task` | 阻塞任务(可选转交 handoff_to) | 写 |
+| `mac_resume_blocked_task` | 解除阻塞并恢复 | 写 |
+| `mac_retry_task` | 重试失败任务(可选 fallback agent) | 写 |
+| `mac_expire_task_leases` | 过期租约任务 → failed(可选 auto_retry) | 写 |
+| `mac_expire_stale_tasks` | 过期 TTL 任务 → failed(可选 auto_retry) | 写 |
 | `mac_expire_stale_agents` | 心跳超时 agent → offline | 写 |
 | `mac_cleanup_tasks` | 删除终态任务(failed/cancelled/rejected/superseded) | 写 |
 
-Resources: `mac://capabilities`(能力清单), `mac://health`(健康状态)。
+**评审(写)**
+
+| Tool | 作用 | 副作用 |
+|------|------|--------|
+| `mac_mark_review_ready` | running → review_ready(需 require_review=True) | 写 |
+| `mac_accept_review` | review_ready → completed | 写 |
+| `mac_reject_review` | review_ready → rejected(自动记录冲突) | 写 |
+
+**查询 / 只读**
+
+| Tool | 作用 | 副作用 |
+|------|------|--------|
+| `mac_list_ready_tasks` | 列出可认领任务 | 只读 |
+| `mac_get_task` | 按 ID 取任务详情 | 只读 |
+| `mac_list_agents` | 列出 agent(默认 online) | 只读 |
+| `mac_worker_packet` | 生成 worker prompt(Markdown,含边界) | 只读 |
+| `mac_review_packet` | 生成 reviewer prompt(Markdown) | 只读 |
+
+**打分 / 质量(scorers)**
+
+| Tool | 作用 | 副作用 |
+|------|------|--------|
+| `mac_list_scorers` | 列出可用 scorer | 只读 |
+| `mac_set_scorer` | 设置/清除当前 scorer(传 None 清除) | 写 |
+| `mac_test_scorer` | 用样本评估某 scorer | 只读 |
+
+**跨 IDE 上下文(vault / memory)**
+
+| Tool | 作用 | 副作用 |
+|------|------|--------|
+| `mac_search_vault` | 检索持久化上下文 vault | 只读 |
+| `mac_save_to_vault` | 写入持久化上下文 vault | 写 |
+| `mac_remember` | 记一条事实到 ledger | 写 |
+| `mac_recall` | 按查询召回事实 | 只读 |
+
+Resources(4): `mac://capabilities`(能力清单), `mac://health`(健康状态), `mac://kanban`(四色看板), `mac://session-context`(跨 IDE 会话快照)。
 
 启动方式:
 
