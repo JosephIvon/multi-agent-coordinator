@@ -18,6 +18,22 @@
 - `mcp_server.py`: kanban resource refactored to delegate to `Registry.get_kanban()`
 - `CLAUDE.md`: added MCP-first cross-IDE skill table and bridge architecture
 
+### Maintenance (post-1.2.0 hygiene)
+
+- `CLAUDE.md`: refreshed stale sections (§0 version/tool count, §1 layout, §9 full
+  30-tools + 4-resources table) to match the actual MCP surface. Previously claimed
+  `16 tools + 2 resources`; now tracks `30 tools + 4 resources`.
+- `tests/test_storage.py`: hardened `test_audit_trail_lookup_stays_fast_with_many_other_rows`
+  against CI flakiness — single cold sample replaced with warmup + median-of-5 and an
+  env-sensitive `<200ms` threshold so a slow CI disk / Windows AV scan no longer flips it red.
+- `pyproject.toml`: pinned `starlette<1.3` in `dev`/`http` extras (1.3.x surfaces a
+  `StarletteDeprecationWarning` from `starlette.testclient` importing `httpx` under a
+  deprecated signature) and kept a `filterwarnings` guard as a safety net.
+- Tooling: added `scripts/check_doc_sync.py` (CLAUDE.md/README tool-count vs `@mcp.tool()`
+  decorators) and `scripts/check_contract_sync.py` (mac_coffee `MAC_AGENT_CONTRACT_VERSION`
+  vs mac-agent `mac_coffee_contract.json`) so the two-repo contract guardrails can be run
+  in CI instead of relying on manual edits.
+
 ## [1.1.0] - 2026-07-31
 
 ### Added

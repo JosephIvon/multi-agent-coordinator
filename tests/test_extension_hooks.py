@@ -8,6 +8,19 @@ import tempfile
 
 import pytest
 
+
+def _temp_db() -> str:
+    """Return a path to a not-yet-created temp .db file, closing the handle.
+
+    ``NamedTemporaryFile(delete=False)`` keeps the file open until GC, which
+    triggers a ResourceWarning at test teardown. Closing immediately lets SQLite
+    create the file itself and keeps the warnings summary clean.
+    """
+    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    path = handle.name
+    handle.close()
+    return path
+
 from mac.extensions import Extension, register, reset
 from mac.protocol.messages import (
     AgentCapability,
@@ -79,7 +92,7 @@ def test_hook_on_agent_registered():
         )
         register(ext)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
 
         agent = AgentCard(
@@ -117,7 +130,7 @@ def test_hook_on_task_done():
         )
         register(ext)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
         _make_running(registry, "t1", "a1")
 
@@ -157,7 +170,7 @@ def test_hook_on_task_blocked():
         )
         register(ext)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
         _make_running_high_risk(registry, "t1", "a1")
 
@@ -200,7 +213,7 @@ def test_hook_on_task_failed():
         )
         register(ext)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
         registry.submit_task(_task("t1", status="running"))
 
@@ -233,7 +246,7 @@ def test_hook_not_called_when_not_registered():
     reset()
     try:
         # No extensions registered at all — just ensure reset() left a clean slate.
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
 
         # register_agent should work
@@ -278,7 +291,7 @@ def test_hook_error_does_not_block_operation():
         )
         register(ext)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
 
         # 1. register_agent with a crashing hook
@@ -313,7 +326,7 @@ def test_hook_error_does_not_block_operation():
         )
         register(ext2)
 
-        db_path2 = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path2 = _temp_db()
         registry2 = Registry(SQLiteTaskLedger(db_path2))
         _make_running_high_risk(registry2, "t3", "a3")
 
@@ -338,7 +351,7 @@ def test_invoke_hook_when_extensions_not_available(monkeypatch):
     from mac import registry as registry_mod
     import sys as _sys
 
-    db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+    db_path = _temp_db()
     registry = Registry(SQLiteTaskLedger(db_path))
 
     # Simulate mac.extensions being unavailable by patching _invoke_hook's import
@@ -390,7 +403,7 @@ def test_multiple_extensions_all_receive_hook():
         register(ext1)
         register(ext2)
 
-        db_path = tempfile.NamedTemporaryFile(suffix=".db", delete=False).name
+        db_path = _temp_db()
         registry = Registry(SQLiteTaskLedger(db_path))
         _make_running(registry, "t1", "a1")
 

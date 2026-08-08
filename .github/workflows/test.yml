@@ -115,3 +115,40 @@ jobs:
 
       - name: Run bridge --demo
         run: python examples/multica_bridge/server.py --demo
+
+  doc-sync:
+    # P1-2 guard: CLAUDE.md §9 / README.md tool+resource counts must match the
+    # actual @mcp.tool() / @mcp.resource() decorators in mcp_server.py. Catches
+    # the historical drift where docs claimed 16+2 while the server shipped 30+4.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check documented MCP surface matches code
+        run: python scripts/check_doc_sync.py
+
+  contract-sync:
+    # P1-5 guard: the mac_coffee <-> mac-agent contract version must be in sync.
+    # On public CI we can only sanity-check that mac-agent's own fixture side is
+    # present and well-formed. The full cross-repo check (mac_coffee
+    # MAC_AGENT_CONTRACT_VERSION vs this fixture's contract_version) requires the
+    # mac_coffee repo, which lives on an internal GitLab not reachable from
+    # GitHub Actions. Run it locally / on the internal CI with:
+    #   python scripts/check_contract_sync.py --mac-coffee-path <path-to-mac_coffee>
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Sanity-check mac-agent contract fixture
+        run: python scripts/check_contract_sync.py
+

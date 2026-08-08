@@ -85,6 +85,8 @@ src/mac/
 | K-001 | `tests/test_release_readiness.py` `import tomllib` 必须 `try/except` 兜底 `tomli`(Py 3.10 兼容) | ✅ 已修 | 守 `requires-python = ">=3.10"` |
 | K-002 | Windows 离线 `WinError 10051` 不要直接用 `socket.socketpair()`,改 `multiprocessing.Pipe` 或 `asyncio.Queue`;`mcp.client.stdio` 在 Windows + Py 3.10 的 ProactorEventLoop 下无法连接子进程 stdio pipe;Py 3.10 stdio E2E 测试 skipOnWindowsOrPy310;CLI `STATUS_STACK_BUFFER_OVERRUN` (0xC0000409) 间歇性崩溃,已加 `threading.stack_size(8MB)` 兜底 | ✅ 已修 | Linux/macOS Py 3.11+ 正常 |
 | K-003 | Python `match` / `X \| None` 是 3.10+ 语法,CI runner 不要锁 3.9 | ⚠️ 预防 | `pyproject.toml` 已守住 |
+| K-004 | `starlette` 1.3.x 在 `starlette.testclient` 导入时抛 `StarletteDeprecationWarning`(httpx 0.27 弃用 `app=` 参数,starlette 仍用旧签名) | ✅ 已修 | `pyproject.toml` 的 `dev`/`http` extra 锁 `starlette<1.3`,`filterwarnings` 留作兜底;starlette 完成 httpx2 迁移后可移除两者 |
+| K-005 | `tests/test_storage.py::test_audit_trail_lookup_stays_fast_with_many_other_rows` 对冷盘/Windows AV 扫描敏感,单次采样易 flaky | ✅ 已修 | 改为 warmup + 中位数(5 次采样)+ `<200ms` 环境敏感阈值;CI 另加 `--reruns 2` 兜底 |
 
 新踩到的:**同格式追加一行**(就追加,别再开 `KNOWN_ISSUES.md` 文件)。
 
@@ -176,6 +178,10 @@ AI 编码工具通过 MCP 接入 MAC,**30 tools + 4 resources**(与 [`README.md`
 | `mac_recall` | 按查询召回事实 | 只读 |
 
 Resources(4): `mac://capabilities`(能力清单), `mac://health`(健康状态), `mac://kanban`(四色看板), `mac://session-context`(跨 IDE 会话快照)。
+
+**工具数同步机制(护栏)**:本表工具数必须与 `src/mac/mcp_server.py` 里 `@mcp.tool()` 装饰器数量、以及 `README.md` 布局块描述保持一致。三者任一漂移会由 `scripts/check_doc_sync.py` 在 CI 拦下(历史曾发生过文档写 `16 tools + 2 resources` 而实际已 30 + 4)。新增/删除 MCP 工具时,**同 commit** 改 `mcp_server.py` + 本表 + `README.md`,然后本地跑 `python scripts/check_doc_sync.py` 自检。
+
+**契约版本同步机制(护栏)**:本 agent 与 mac_coffee 之间的 `MAC_AGENT_CONTRACT_VERSION` 由 `tests/contract_fixtures/mac_coffee_contract.json` 的 `contract_version` 镜像。任一端升级契约版本,**同 release** 必须同步另一端,并跑 `python scripts/check_contract_sync.py --mac-coffee-path <mac_coffee 仓路径>` 确认一致(签名级漂移另由 `test_cross_project_contract.py` 覆盖)。CI 的 `contract-sync` job 仅做 mac-agent 侧 fixture 自检(内网 GitLab 不可从 GitHub Actions 访问 mac_coffee)。
 
 启动方式:
 
