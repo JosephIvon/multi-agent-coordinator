@@ -102,3 +102,85 @@ def test_protocol_constants_include_mvp_state_and_error_vocabulary():
     assert "completed" in TASK_STATUSES
     assert "high" in RISK_LEVELS
     assert "PAYLOAD_TOO_LARGE" in ERROR_CODES
+
+
+def test_task_transfer_agent_context_routing_fields_defaults():
+    """Backward-compat guard for the 2026-08-09 agent-context-ops extension.
+
+    The network / capability / data-classification / lease fields were added
+    with defaults so pre-existing callers (e.g. older TaskTransfer payloads
+    without them) keep constructing. New fields must not be required.
+    """
+    task = TaskTransfer(
+        task_id="task-1",
+        trace_id="trace-1",
+        source_agent_id="planner",
+        payload=TaskPayload(type="custom", summary="handoff"),
+    )
+
+    assert task.required_network == "local"
+    assert task.required_capabilities == []
+    assert task.data_classification == "local-only"
+    assert task.lease_owner is None
+    assert task.lease_expire_at is None
+    assert task.fallback_policy is None
+
+    # Defaults must not leak a shared mutable list across instances.
+    other = TaskTransfer(
+        task_id="task-2",
+        trace_id="trace-2",
+        source_agent_id="planner",
+        payload=TaskPayload(type="custom", summary="handoff"),
+    )
+    assert other.required_capabilities == []
+    other.required_capabilities.append("ssh")
+    assert task.required_capabilities == []
+
+
+def test_task_transfer_agent_context_routing_fields_roundtrip():
+    """Explicit values for the new routing/lease fields survive a dump/load
+    cycle and the Literal constraints reject out-of-vocabulary values.
+    """
+    task = TaskTransfer(
+        task_id="task-1",
+        trace_id="trace-1",
+        source_agent_id="planner",
+        payload=TaskPayload(type="custom", summary="handoff"),
+        required_network="cloud",
+        required_capabilities=["ssh", "mcp_browser"],
+        data_classification="cloud-safe",
+        lease_owner="worker-7",
+        lease_expire_at="2026-08-10T12:00:00+00:00",
+        fallback_policy="escalate",
+    )
+
+    dumped = task.model_dump(mode="json")
+    assert dumped["required_network"] == "cloud"
+    assert dumped["required_capabilities"] == ["ssh", "mcp_browser"]
+    assert dumped["data_classification"] == "cloud-safe"
+    assert dumped["lease_owner"] == "worker-7"
+    assert dumped["lease_expire_at"] == "2026-08-10T12:00:00+00:00"
+    assert dumped["fallback_policy"] == "escalate"
+
+    reloaded = TaskTransfer.model_validate(dumped)
+    assert reloaded.required_network == "cloud"
+    assert reloaded.lease_owner == "worker-7"
+
+    # Literal vocabularies must reject unknown values.
+    with pytest.raises(ValidationError):
+        TaskTransfer(
+            task_id="task-1",
+            trace_id="trace-1",
+            source_agent_id="planner",
+            payload=TaskPayload(type="custom", summary="handoff"),
+            required_network="galactic",
+        )
+    with pytest.raises(ValidationError):
+        TaskTransfer(
+            task_id="task-1",
+            trace_id="trace-1",
+            source_agent_id="planner",
+            payload=TaskPayload(type="custom", summary="handoff"),
+            data_classification="public",
+        )
+

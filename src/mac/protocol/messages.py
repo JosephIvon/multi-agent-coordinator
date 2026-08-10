@@ -309,6 +309,22 @@ class TaskTransfer(BaseModel):
     project_context: str | None = None
     required_role: str | None = None
 
+    # Network / capability / data routing (per agent-context-ops plan 2026-08-09)
+    required_network: Literal["local", "office-intranet", "cloud"] = "local"
+    required_capabilities: list[str] = Field(
+        default_factory=list,
+        description="Capability names the executing agent must hold, e.g. ['ssh', 'browser', 'mcp_xxx', 'gpu'].",
+    )
+    data_classification: Literal["local-only", "office-only", "cloud-safe"] = "local-only"
+
+    # Lease ownership (pairing with lease_seconds for timebox; these add explicit holder + expiry)
+    lease_owner: str | None = Field(default=None, description="Agent id currently holding the active lease.")
+    lease_expire_at: str | None = Field(default=None, description="ISO timestamp when the current lease expires.")
+    fallback_policy: str | None = Field(
+        default=None,
+        description="What to do when no capable agent is available, e.g. 'queue', 'escalate', 'block'.",
+    )
+
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
