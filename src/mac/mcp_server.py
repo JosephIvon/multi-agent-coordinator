@@ -15,7 +15,7 @@ from mac import scoring
 from mac.protocol.errors import QualityGateError, StateConflictError
 from mac.protocol.messages import TaskTransfer
 from mac.quality.gate import evaluate_quality_gate
-from mac.registry import Registry, _required_capability
+from mac.registry import Registry
 from mac.storage.sqlite import SQLiteTaskLedger
 
 logger = logging.getLogger("mac.mcp_server")
@@ -251,12 +251,26 @@ def mac_done(
                 risks=risks or [],
                 verification=[VerificationEntry(command="done", result="pass")],
             )
-        return reg.done(
+        result = reg.done(
             task_id,
             agent_id,
             quality_result=quality_result,
             handoff=handoff,
         )
+
+        # EOD hint: if 3+ tasks completed today, suggest running EOD
+        try:
+            kanban = reg.get_kanban()
+            done_today = kanban.get("done", {}).get("total", 0)
+            if done_today >= 3:
+                result["eod_hint"] = (
+                    f"{done_today} tasks completed today. "
+                    "Consider running EOD: pwsh -NoProfile -File ~/.claude/hooks/eod.ps1"
+                )
+        except Exception:
+            pass  # Non-fatal: EOD hint is optional
+
+        return result
 
     return _safe_call(_do)
 
@@ -791,21 +805,53 @@ def _obsidian_headers() -> dict[str, str]:
 
 
 @mcp.tool()
-def mac_search_vault(query: str, limit: int = 10) -> str:
+def mac_search_vault(
+    query: str,
+    limit: int = 10,
+    type: str | None = None,
+    path_prefix: str | None = None,
+) -> str:
     """Search the Obsidian vault via the Local REST API.
 
     Returns matching notes with titles, paths, and snippet previews.
     Use this to find project context, past decisions, and technical
     notes — the same source of truth across all IDEs.
 
+    :param query: Search terms (Obsidian search syntax supported).
+    :param limit: Maximum number of results.
+    :param type: Filter by note type — ``decision``, ``pitfall``, ``daily``,
+        ``project``, ``inbox``, or ``None`` for unfiltered.  Implemented as
+        a ``tag:`` prefix in the Obsidian query (e.g. ``tag:decision``).
+    :param path_prefix: Only return notes under this vault-relative path
+        (e.g. ``10-projects/`` or ``daily/``).  Implemented as a ``path:``
+        prefix in the Obsidian query.
+
     Requires the Obsidian Local REST API plugin running on port 27124
     and OBSIDIAN_API_TOKEN set in your environment.
     """
-    def _do() -> Any:
-        import urllib.request
-        import urllib.error
+    # Map type to Obsidian tag
+    _TYPE_TAGS: dict[str, str] = {
+        "decision": "tag:decision",
+        "pitfall": "tag:pitfall",
+        "daily": "tag:daily",
+        "project": "tag:project",
+        "inbox": "tag:inbox",
+    }
 
-        url = f"{_OBSIDIAN_API}/search/?query={urllib.parse.quote(query)}&limit={int(limit)}"
+    def _do() -> Any:
+        import urllib.error
+        import urllib.request
+
+        # Build composite query with type and path filters
+        parts: list[str] = []
+        if type and type in _TYPE_TAGS:
+            parts.append(_TYPE_TAGS[type])
+        if path_prefix:
+            parts.append(f"path:{path_prefix}")
+        parts.append(query)
+        composite_query = " ".join(parts)
+
+        url = f"{_OBSIDIAN_API}/search/?query={urllib.parse.quote(composite_query)}&limit={int(limit)}"
         req = urllib.request.Request(url, headers=_obsidian_headers())
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -823,22 +869,52 @@ def mac_search_vault(query: str, limit: int = 10) -> str:
 @mcp.tool()
 def mac_save_to_vault(
     content: str,
-    path: str,
+    path: str | None = None,
     privacy: str = "private",
+    status: str = "draft",
 ) -> str:
     """Save a note to the Obsidian vault via the Local REST API.
 
+    By default writes to ``00-inbox/`` with ``status: draft`` — the note
+    must be reviewed by a human before being promoted to permanent
+    knowledge zones (``10-projects/``, ``20-areas/``).  Use
+    ``mac_promote_to_knowledge`` to move a reviewed note.
+
     :param content: Markdown content of the note.
-    :param path: Vault-relative path, e.g. ``00-inbox/quick-note.md``.
+    :param path: Vault-relative path.  Defaults to ``00-inbox/<slug>.md``
+        where *slug* is derived from the first heading or a timestamp.
+        Explicit paths like ``10-projects/my-project/api-design.md`` are
+        allowed but should only be used for confirmed knowledge.
     :param privacy: Privacy marker — ``public``, ``private``, or ``company``.
         Will be added to the note's frontmatter.
+    :param status: Lifecycle status — ``draft`` (default), ``reviewed``,
+        or ``promoted``.  Draft notes live in ``00-inbox/`` until reviewed.
 
     Requires the Obsidian Local REST API plugin running on port 27124
     and OBSIDIAN_API_TOKEN set in your environment.
     """
     def _do() -> Any:
-        import urllib.request
+        import re as _re
         import urllib.error
+        import urllib.request
+
+        nonlocal content
+
+        # Default path: 00-inbox/<slug>.md
+        if not path:
+            # Derive slug from first heading or timestamp
+            heading_match = _re.search(r'^#\s+(.+)$', content, _re.MULTILINE)
+            if heading_match:
+                slug = heading_match.group(1).strip()
+                slug = _re.sub(r'[\\/:*?"<>|]', '-', slug)
+                slug = _re.sub(r'\s+', '-', slug).lower()[:60]
+                slug = _re.sub(r'-+$', '', slug)
+            else:
+                from datetime import datetime, timezone
+                slug = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            vault_path = f"00-inbox/{slug}.md"
+        else:
+            vault_path = path
 
         # Add frontmatter wrapper if not already present
         if not content.strip().startswith("---"):
@@ -848,23 +924,113 @@ def mac_save_to_vault(
                 f"---\n"
                 f"created: {now}\n"
                 f"privacy: {privacy}\n"
+                f"status: {status}\n"
                 f"source: mac-mcp\n"
                 f"---\n\n"
                 f"{content}"
             )
+        else:
+            # Ensure status field exists in existing frontmatter
+            if "status:" not in content.split("---")[1]:
+                content = content.replace(
+                    "---\n", f"---\nstatus: {status}\n", 1
+                )
 
-        url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(path, safe='')}"
+        url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(vault_path, safe='')}"
         data = json.dumps({"content": content}).encode("utf-8")
         req = urllib.request.Request(
             url, data=data, headers=_obsidian_headers(), method="PUT",
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
-                return json.dumps({"saved": path, "status": resp.status})
+                return json.dumps({"saved": vault_path, "status": resp.status})
         except urllib.error.HTTPError as e:
             raise ToolError(f"obsidian_save: HTTP {e.code} — {e.reason}")
         except urllib.error.URLError as e:
             raise ToolError(f"obsidian_save: connection failed ({e.reason}) — is Obsidian running?")
+
+    return _safe_call(_do)
+
+
+@mcp.tool()
+def mac_promote_to_knowledge(
+    source_path: str,
+    target_path: str,
+) -> str:
+    """Promote a reviewed draft note to a permanent knowledge zone.
+
+    Reads a note from ``00-inbox/`` (or elsewhere), writes it to the
+    target path (e.g. ``10-projects/my-project/api-design.md`` or
+    ``20-areas/20-programming/python-async-gotchas.md``), and updates
+    its ``status`` frontmatter to ``promoted``.  The source note is
+    then deleted.
+
+    Use this after a human has reviewed a draft and confirmed it has
+    long-term value.  Do NOT call this automatically — promotion
+    requires human approval.
+
+    :param source_path: Vault-relative path of the draft note
+        (e.g. ``00-inbox/2026-08-10-api-design.md``).
+    :param target_path: Vault-relative path for the promoted note
+        (e.g. ``10-projects/my-project/api-design.md``).
+    """
+    def _do() -> Any:
+        import urllib.error
+        import urllib.request
+
+        # 1. Read source note
+        read_url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(source_path, safe='')}"
+        req = urllib.request.Request(read_url, headers=_obsidian_headers())
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                content = data.get("content", "")
+        except urllib.error.HTTPError as e:
+            raise ToolError(f"promote: source not found (HTTP {e.code}) — does {source_path} exist?") from e
+        except urllib.error.URLError as e:
+            raise ToolError(f"promote: connection failed ({e.reason}) — is Obsidian running?") from e
+
+        # 2. Update status in frontmatter
+        if content.strip().startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                fm = parts[1]
+                import re as _re
+                fm = _re.sub(r'status:\s*\w+', 'status: promoted', fm)
+                content = f"---{fm}---{parts[2]}"
+
+        # 3. Write to target path
+        write_url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(target_path, safe='')}"
+        put_data = json.dumps({"content": content}).encode("utf-8")
+        req = urllib.request.Request(
+            write_url, data=put_data, headers=_obsidian_headers(), method="PUT",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except urllib.error.HTTPError as e:
+            raise ToolError(f"promote: write failed (HTTP {e.code}) — {e.reason}") from e
+        except urllib.error.URLError as e:
+            raise ToolError(f"promote: connection failed ({e.reason})") from e
+
+        # 4. Delete source note
+        del_url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(source_path, safe='')}"
+        req = urllib.request.Request(
+            del_url, headers=_obsidian_headers(), method="DELETE",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                pass
+        except urllib.error.HTTPError:
+            # Non-fatal: target was written, source just wasn't cleaned up
+            pass
+
+        return json.dumps({
+            "promoted": True,
+            "from": source_path,
+            "to": target_path,
+            "status": "promoted",
+        })
 
     return _safe_call(_do)
 
@@ -927,6 +1093,7 @@ def session_context_resource() -> str:
     - ``active_agents``: agents currently online
     - ``open_conflicts``: unresolved conflict count
     - ``metrics_summary``: cycle time, handoff rate, quality rate
+    - ``daily_notes``: last 3 daily notes from Obsidian vault (if available)
     """
     reg = _registry()
     from mac.metrics import compute_metrics
@@ -937,6 +1104,33 @@ def session_context_resource() -> str:
     online = [a.agent_id for a in agents if getattr(a, "status", "") == "online"]
     conflicts = reg.list_conflicts(resolved=False)
     metrics = compute_metrics(reg.ledger)
+
+    # Fetch last 3 daily notes from Obsidian vault (graceful fallback)
+    daily_notes: list[dict[str, str]] = []
+    try:
+        import urllib.error as _ue
+        import urllib.request
+        from datetime import datetime, timedelta, timezone
+
+        headers = _obsidian_headers()
+        today = datetime.now(timezone.utc)
+        for i in range(3):
+            d = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            path = f"daily/{d}.md"
+            url = f"{_OBSIDIAN_API}/vault/{urllib.parse.quote(path, safe='')}"
+            req = urllib.request.Request(url, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read().decode())
+                    content = data.get("content", "")
+                    # Truncate to 500 chars for context injection
+                    if len(content) > 500:
+                        content = content[:497] + "..."
+                    daily_notes.append({"date": d, "content": content})
+            except (_ue.HTTPError, _ue.URLError):
+                continue  # Note doesn't exist or Obsidian not running
+    except ToolError:
+        pass  # OBSIDIAN_API_TOKEN not set — skip daily notes
 
     return json.dumps({
         "kanban": kanban,
@@ -950,6 +1144,7 @@ def session_context_resource() -> str:
             "retry_rate": metrics.get("retry_rate", 0),
             "conflict_rate": metrics.get("conflict_rate", 0),
         },
+        "daily_notes": daily_notes,
     })
 
 

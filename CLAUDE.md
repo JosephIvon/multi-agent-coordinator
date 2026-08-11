@@ -120,7 +120,7 @@ src/mac/
 
 ## 9. MCP Server 指引
 
-AI 编码工具通过 MCP 接入 MAC,**30 tools + 4 resources**(与 [`README.md`](README.md) / [`docs/SPEC.md`](docs/SPEC.md) 同步):
+AI 编码工具通过 MCP 接入 MAC,**31 tools + 4 resources**(与 [`README.md`](README.md) / [`docs/SPEC.md`](docs/SPEC.md) 同步):
 
 **任务生命周期(写)**
 
@@ -172,8 +172,9 @@ AI 编码工具通过 MCP 接入 MAC,**30 tools + 4 resources**(与 [`README.md`
 
 | Tool | 作用 | 副作用 |
 |------|------|--------|
-| `mac_search_vault` | 检索持久化上下文 vault | 只读 |
-| `mac_save_to_vault` | 写入持久化上下文 vault | 写 |
+| `mac_search_vault` | 检索 vault(支持 type/path_prefix 过滤) | 只读 |
+| `mac_save_to_vault` | 写入 vault(默认 00-inbox/, status: draft) | 写 |
+| `mac_promote_to_knowledge` | 将审核通过的草稿提升到永久知识区 | 写 |
 | `mac_remember` | 记一条事实到 ledger | 写 |
 | `mac_recall` | 按查询召回事实 | 只读 |
 

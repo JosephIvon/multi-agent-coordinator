@@ -219,6 +219,7 @@ def _build_parser() -> argparse.ArgumentParser:
     done.add_argument("--changed-file", action="append", default=[], help="Files changed by this task")
     done.add_argument("--risk", action="append", default=[], help="Residual risks")
     done.add_argument("--verification", action="append", default=[], help="Verification entries (command:result:description)")
+    done.add_argument("--eod", action="store_true", help="Run EOD summary after task completion (pwsh ~/.claude/hooks/eod.ps1)")
 
     fail = subcommands.add_parser("fail", help="Mark a task failed")
     fail.add_argument("--db", default=_cli_db_arg())
@@ -889,6 +890,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             handoff=handoff,
         )
         _print_json(result)
+
+        # EOD trigger: if --eod flag is set, run EOD script after completion
+        if getattr(args, "eod", False):
+            import shutil
+            import subprocess
+            eod_script = Path.home() / ".claude" / "hooks" / "eod.ps1"
+            if eod_script.exists():
+                pwsh = shutil.which("pwsh")
+                if pwsh:
+                    print("\n📋 Running EOD summary...")
+                    subprocess.run(
+                        [pwsh, "-NoProfile", "-File", str(eod_script)],
+                        timeout=30,
+                    )
+                else:
+                    print("\n⚠️ pwsh not found — install PowerShell 7 to use --eod")
+            else:
+                print(f"\n⚠️ EOD script not found: {eod_script}")
+
         return 0
 
     if args.command == "fail":
@@ -1104,7 +1124,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "kanban":
-        import json as _json
         from mac.registry import Registry
         from mac.storage.sqlite import SQLiteStorage
 

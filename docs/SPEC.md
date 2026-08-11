@@ -324,9 +324,12 @@ Environment variable: `MAC_REVIEWER_CAPABILITY=review_code`.
   "recent_facts": [...],
   "active_agents": [...],
   "open_conflicts": [...],
-  "metrics": {...}
+  "metrics": {...},
+  "daily_notes": [{"date": "2026-08-10", "content": "..."}, ...]
 }
 ```
+
+`daily_notes` contains the last 3 daily notes from the Obsidian vault (truncated to 500 chars each), giving cross-IDE agents the same context that the Claude Code session-start hook provides. Gracefully degrades to an empty list if Obsidian is not running or `OBSIDIAN_API_TOKEN` is not set.
 
 This is the primary entry point for cross-IDE session recovery. See §9 for full MCP tool/resource listing.
 
@@ -441,9 +444,11 @@ Returns:
 - `{"status": "review_ready", "task_id": ..., "quality_gate": "passed", "review": True}` — review required
 - `{"status": "blocked", "task_id": ..., "quality_gate": "failed", "reason": ...}` — gate hard-failed
 
-CLI: `mac-agent done --task-id T --agent-id A [--quality-command CMD --quality-status passed|failed] [--changed-file FILE] [--risk RISK]`
+CLI: `mac-agent done --task-id T --agent-id A [--quality-command CMD --quality-status passed|failed] [--changed-file FILE] [--risk RISK] [--eod]`
 
 MCP: `mac_done(task_id, agent_id, quality_result?, changed_files?, risks?)`
+
+When 3+ tasks are completed in a day, `mac_done` returns an `eod_hint` field suggesting the EOD summary script. The `--eod` CLI flag triggers `pwsh ~/.claude/hooks/eod.ps1` after task completion.
 
 HTTP: `POST /tasks/{task_id}/done` with body `{agent_id, quality_result?, changed_files?, risks?}`
 
@@ -505,10 +510,13 @@ Registry API: `remember_fact(key, value, category)` / `recall_facts(query, limit
 
 ### Obsidian Vault Integration
 
-Two MCP tools for IDE-independent vault access via Obsidian Local REST API (https://127.0.0.1:27124):
+Three MCP tools for IDE-independent vault access via Obsidian Local REST API (https://127.0.0.1:27124):
 
-- `mac_search_vault(query, limit=10)` — full-text search
-- `mac_save_to_vault(content, path, privacy="private")` — create/update notes with frontmatter
+- `mac_search_vault(query, limit=10, type=None, path_prefix=None)` — full-text search with optional type filter (`decision`, `pitfall`, `daily`, `project`, `inbox`) and path prefix scoping
+- `mac_save_to_vault(content, path=None, privacy="private", status="draft")` — create/update notes; defaults to `00-inbox/` with `status: draft` for human review before promotion
+- `mac_promote_to_knowledge(source_path, target_path)` — move a reviewed draft from `00-inbox/` to a permanent zone (`10-projects/`, `20-areas/`), set `status: promoted`, delete source
+
+Knowledge lifecycle: `draft` → human reviews → `reviewed` → `promoted` (via `mac_promote_to_knowledge`).
 
 Requires Bearer auth token (env var `OBSIDIAN_API_TOKEN`).
 
@@ -626,11 +634,12 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_set_scorer` | Set active scoring function by name |
 | `mac_test_scorer` | Test a scorer against tasks |
 
-#### Cross-IDE Knowledge (4)
+#### Cross-IDE Knowledge (5)
 | Tool | Function |
 |------|----------|
-| `mac_search_vault` | Full-text search Obsidian vault (REST API) |
-| `mac_save_to_vault` | Create/update note in Obsidian vault |
+| `mac_search_vault` | Full-text search Obsidian vault (REST API), with type/path filters |
+| `mac_save_to_vault` | Create/update note in Obsidian vault (defaults to `00-inbox/`, `status: draft`) |
+| `mac_promote_to_knowledge` | Move reviewed draft to permanent zone, set `status: promoted` |
 | `mac_remember` | Store cross-session fact in MAC ledger |
 | `mac_recall` | Recall facts by query |
 
@@ -648,7 +657,7 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac://capabilities` | Agents grouped by capability name |
 | `mac://health` | Health summary: `last_updated`, `open_tasks`, `inflight_agents` |
 | `mac://kanban` | Four-color board: red/yellow/green/done |
-| `mac://session-context` | Full project snapshot: kanban + facts + agents + conflicts + metrics |
+| `mac://session-context` | Full project snapshot: kanban + facts + agents + conflicts + metrics + daily notes |
 
 ### Extension HTTP and WebSocket surface
 
