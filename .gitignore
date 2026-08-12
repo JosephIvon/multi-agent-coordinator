@@ -65,3 +65,6 @@ build/
 .arts/
 active/
 .agent-context/
+
+# UV lock file (local, not shared)
+uv.lock
