@@ -8,6 +8,7 @@ except ImportError:  # pragma: no cover - exercised only on Python 3.10
 import subprocess
 import sys
 from pathlib import Path
+from shutil import copy2
 
 import mac
 
@@ -29,6 +30,45 @@ def test_http_extra_declares_http_adapter_runtime_dependency():
 
     assert "http" in extras
     assert any(requirement.startswith("fastapi") for requirement in extras["http"])
+
+
+def test_mcp_extras_remain_on_the_fastmcp_v1_compatibility_line():
+    extras = _pyproject()["project"]["optional-dependencies"]
+
+    for extra_name in ("mcp", "dev"):
+        mcp_requirements = [requirement for requirement in extras[extra_name] if requirement.startswith("mcp")]
+        assert mcp_requirements == ["mcp>=1.0,<2"]
+
+
+def test_doc_sync_rejects_drift_in_spec_and_integrations(tmp_path: Path):
+    fixture_root = tmp_path / "repo"
+    server_dir = fixture_root / "src" / "mac"
+    docs_dir = fixture_root / "docs"
+    server_dir.mkdir(parents=True)
+    docs_dir.mkdir()
+    copy2(ROOT / "src" / "mac" / "mcp_server.py", server_dir / "mcp_server.py")
+    for relative_path in ("CLAUDE.md", "README.md", "docs/SPEC.md", "docs/INTEGRATIONS.md"):
+        target = fixture_root / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy2(ROOT / relative_path, target)
+
+    for relative_path, old, new in (
+        ("docs/SPEC.md", "### Tools (31)", "### Tools (30)"),
+        ("docs/INTEGRATIONS.md", "31 tools + 4 resources", "30 tools + 4 resources"),
+    ):
+        path = fixture_root / relative_path
+        path.write_text(path.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "check_doc_sync.py"), "--root", str(fixture_root)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "docs/SPEC.md claims 30 tools" in result.stderr
+    assert "docs/INTEGRATIONS.md claims 30 tools" in result.stderr
 
 
 def test_dev_extra_contains_test_http_and_release_tooling():

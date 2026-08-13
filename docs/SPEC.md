@@ -510,13 +510,13 @@ Registry API: `remember_fact(key, value, category)` / `recall_facts(query, limit
 
 ### Obsidian Vault Integration
 
-Three MCP tools for IDE-independent vault access via Obsidian Local REST API (https://127.0.0.1:27124):
+Three MCP tools provide IDE-independent vault access via Obsidian Local REST API (https://127.0.0.1:27124); the two fact tools below use the MAC ledger:
 
 - `mac_search_vault(query, limit=10, type=None, path_prefix=None)` — full-text search with optional type filter (`decision`, `pitfall`, `daily`, `project`, `inbox`) and path prefix scoping
 - `mac_save_to_vault(content, path=None, privacy="private", status="draft")` — create/update notes; defaults to `00-inbox/` with `status: draft` for human review before promotion
-- `mac_promote_to_knowledge(source_path, target_path)` — move a reviewed draft from `00-inbox/` to a permanent zone (`10-projects/`, `20-areas/`), set `status: promoted`, delete source
+- `mac_promote_to_knowledge(source_path, target_path)` — caller-directed copy/move that sets `status: promoted` and deletes the source. The current API accepts vault-relative source and target paths; the caller must obtain human approval and enforce the vault's placement policy.
 
-Knowledge lifecycle: `draft` → human reviews → `reviewed` → `promoted` (via `mac_promote_to_knowledge`).
+Knowledge lifecycle policy: `draft` → human reviews → `reviewed` → `promoted` (via `mac_promote_to_knowledge`). Human approval and permanent-zone placement are workflow responsibilities, not server-enforced path checks in this API version.
 
 Requires Bearer auth token (env var `OBSIDIAN_API_TOKEN`).
 
@@ -577,7 +577,7 @@ Payload JSON is deserialized in Python and aggregated there (no `json_extract`, 
 
 ## 9. MCP Server
 
-MAC exposes its coordination API as an MCP (Model Context Protocol) server for AI coding tools. The server uses `FastMCP` with stdio transport.
+MAC exposes its coordination API as an MCP (Model Context Protocol) server for AI coding tools. The server uses the MCP 1.x `FastMCP` API with stdio transport; MCP 2.x is deliberately excluded until its incompatible server API is migrated and verified.
 
 ### Error Signaling
 
@@ -593,7 +593,7 @@ Domain errors are raised as `ToolError` so the MCP SDK marks responses with `isE
 
 LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. Business errors are never returned as `isError=False`.
 
-### Tools (30)
+### Tools (31)
 
 #### Task Coordination (10)
 | Tool | Function |

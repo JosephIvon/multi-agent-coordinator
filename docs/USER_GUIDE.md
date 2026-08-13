@@ -169,7 +169,10 @@ mac-agent review-lifecycle reject --task-id task-1 --reviewer-id reviewer \
 
 ---
 
-## 5. MCP 工具参考（15 个）
+## 5. 核心 MCP 工具参考（15 个）
+
+完整的 31 个工具和 4 个只读资源以 [README](../README.md#available-tools-31) 与
+[SPEC](SPEC.md#9-mcp-server) 为准；本节只保留日常协作最常用的核心子集。
 
 | 工具 | 作用 | 副作用 |
 |------|------|--------|
@@ -189,7 +192,7 @@ mac-agent review-lifecycle reject --task-id task-1 --reviewer-id reviewer \
 | `mac_expire_stale_tasks` | 过期卡住的任务 | 写 |
 | `mac_expire_stale_agents` | 下线超时 Agent | 写 |
 
-MCP Resources（只读）：
+常用 MCP Resources（只读）：
 - `mac://capabilities` — Agent 能力清单
 - `mac://health` — 健康状态
 

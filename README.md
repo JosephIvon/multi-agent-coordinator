@@ -163,7 +163,7 @@ Core endpoints:
 
 ## MCP Server
 
-MAC exposes its coordination API as an MCP (Model Context Protocol) server, so AI coding tools like Claude Code, Cursor, and Windsurf can call MAC natively.
+MAC exposes its coordination API as an MCP (Model Context Protocol) server, so AI coding tools like Claude Code, Cursor, and Windsurf can call MAC natively. MAC v1.2 currently supports the MCP 1.x FastMCP API; MCP 2.x requires a coordinated adapter migration and is not installed by this release.
 
 ### Setup
 
@@ -202,7 +202,7 @@ claude mcp add mac -- mac-mcp-server
 }
 ```
 
-### Available Tools (30)
+### Available Tools (31)
 
 | Tool | Purpose | Side Effect |
 |------|---------|-------------|
@@ -234,6 +234,7 @@ claude mcp add mac -- mac-mcp-server
 | `mac_test_scorer` | Test a scorer against proposed tasks | read-only |
 | `mac_search_vault` | Full-text search Obsidian vault | read-only |
 | `mac_save_to_vault` | Create/update note in Obsidian vault | write |
+| `mac_promote_to_knowledge` | Promote a reviewed vault draft to permanent knowledge | write |
 | `mac_remember` | Store cross-session fact in MAC ledger | write |
 | `mac_recall` | Search facts by query (empty = recent 10) | read-only |
 
@@ -406,7 +407,7 @@ src/mac/
   metrics.py         Observability aggregation (6 metrics)
   cli.py             Console entry point
   events.py          In-process event bus
-  mcp_server.py      MCP Server (30 tools + 4 resources)
+  mcp_server.py      MCP Server (31 tools + 4 resources)
 ```
 
 ---

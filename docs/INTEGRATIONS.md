@@ -5,15 +5,19 @@ and context entry points only.
 
 ## MCP Surface (v1.2.0)
 
-The MCP server now exposes **26 tools** (up from 16) and **4 resources** (up from 2):
+The MCP server exposes 31 tools + 4 resources. The authoritative
+per-tool table is maintained in [README](../README.md#available-tools-31) and
+[SPEC](SPEC.md#9-mcp-server); this integration page keeps only the grouping
+needed to choose an IDE entry point.
 
 | Category | Count | Tools |
 |---|---|---|
-| Task Coordination | 12 | `mac_next_task`, `mac_done`, `mac_submit_task`, `mac_claim_task`, `mac_record_quality_and_complete`, `mac_fail_task`, `mac_save_handoff`, `mac_list_ready_tasks`, `mac_review_packet`, `mac_worker_packet`, `mac_mark_review_ready`, `mac_accept_review`, `mac_reject_review` |
-| Maintenance | 3 | `mac_expire_stale_tasks`, `mac_expire_stale_agents`, `mac_cleanup_tasks` |
+| Task Coordination & Lifecycle | 23 | Task lifecycle, review, packets, stale expiry/cleanup, retry/block/lease, and agent discovery |
 | Scoring | 3 | `mac_list_scorers`, `mac_set_scorer`, `mac_test_scorer` |
-| Cross-IDE Knowledge | 4 | `mac_search_vault`, `mac_save_to_vault`, `mac_remember`, `mac_recall` |
-| Lease Management | 4 | `mac_expire_task_leases`, `mac_list_agents`, `mac_get_task`, `mac_block_task` |
+| Cross-IDE Knowledge | 5 | Vault search/save/promote plus fact remember/recall |
+
+The category counts are navigational only; use the linked authoritative tables
+for exact names and side effects.
 
 MCP Resources:
 

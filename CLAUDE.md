@@ -28,7 +28,7 @@ src/mac/
 ├── quality/gate.py         # 质量门
 ├── runner/                 # 本地 adapter(命令/Pytest 模板)
 ├── transport/http_ws.py    # FastAPI app(仅 http extra)
-├── mcp_server.py           # MCP Server(30 tools + 4 resources,仅 mcp extra)
+├── mcp_server.py           # MCP Server(31 tools + 4 resources,仅 mcp extra)
 ├── metrics.py              # 可观测性聚合(6 指标)
 ├── events.py               # TaskEventBus
 └── cli.py                  # CLI 子命令
@@ -43,7 +43,7 @@ src/mac/
 - **类型注解**:公共 API 必须显式返回类型;`X | None` 不用 `Optional[X]`(ruff UP007 已开启)
 - **错误**:业务异常抛 `MACError` 子类(见 [`protocol/errors.py`](src/mac/protocol/errors.py));`StatusConflict` 是 SQLite CAS,不算业务错误
 - **凭据**:API key / token / 路径前缀**永远不进 SQLite / log / CLI 输出**
-- **依赖**:仅 [`pyproject.toml`](pyproject.toml);**不要新建 `requirements.txt`**
+- **依赖**:仅 [`pyproject.toml`](pyproject.toml);**不要新建 `requirements.txt`**。MCP 依赖固定在 `>=1.0,<2`，升级到 2.x 必须连同 `mcp_server.py`、MCP 契约测试和文档一起迁移。
 - **I/O 边界**:Registry / SQLite / Quality Gate 都是同步接口;CLI / HTTP 是 thin wrapper,不在 wrapper 加业务规则
 
 ---
@@ -87,6 +87,7 @@ src/mac/
 | K-003 | Python `match` / `X \| None` 是 3.10+ 语法,CI runner 不要锁 3.9 | ⚠️ 预防 | `pyproject.toml` 已守住 |
 | K-004 | `starlette` 1.3.x 在 `starlette.testclient` 导入时抛 `StarletteDeprecationWarning`(httpx 0.27 弃用 `app=` 参数,starlette 仍用旧签名) | ✅ 已修 | `pyproject.toml` 的 `dev`/`http` extra 锁 `starlette<1.3`,`filterwarnings` 留作兜底;starlette 完成 httpx2 迁移后可移除两者 |
 | K-005 | `tests/test_storage.py::test_audit_trail_lookup_stays_fast_with_many_other_rows` 对冷盘/Windows AV 扫描敏感,单次采样易 flaky | ✅ 已修 | 改为 warmup + 中位数(5 次采样)+ `<200ms` 环境敏感阈值;CI 另加 `--reruns 2` 兜底 |
+| K-006 | 未设置上界的 `mcp>=1.0` 会解析到 MCP 2.x；该版本移除了 v1 的 `mcp.server.fastmcp` 导入路径，导致 MCP 测试在收集阶段失败 | ✅ 已修 | v1.2 固定 `mcp>=1.0,<2`；升级 2.x 前须完成服务端与契约测试的迁移 |
 
 新踩到的:**同格式追加一行**(就追加,别再开 `KNOWN_ISSUES.md` 文件)。
 
@@ -180,7 +181,7 @@ AI 编码工具通过 MCP 接入 MAC,**31 tools + 4 resources**(与 [`README.md`
 
 Resources(4): `mac://capabilities`(能力清单), `mac://health`(健康状态), `mac://kanban`(四色看板), `mac://session-context`(跨 IDE 会话快照)。
 
-**工具数同步机制(护栏)**:本表工具数必须与 `src/mac/mcp_server.py` 里 `@mcp.tool()` 装饰器数量、以及 `README.md` 布局块描述保持一致。三者任一漂移会由 `scripts/check_doc_sync.py` 在 CI 拦下(历史曾发生过文档写 `16 tools + 2 resources` 而实际已 30 + 4)。新增/删除 MCP 工具时,**同 commit** 改 `mcp_server.py` + 本表 + `README.md`,然后本地跑 `python scripts/check_doc_sync.py` 自检。
+**工具数同步机制(护栏)**:本表工具数必须与 `src/mac/mcp_server.py` 里 `@mcp.tool()` 装饰器数量、以及 `README.md` 布局块描述保持一致。三者任一漂移会由 `scripts/check_doc_sync.py` 在 CI 拦下(历史曾发生过文档写 `16 tools + 2 resources` 而实际已 31 + 4)。新增/删除 MCP 工具时,**同 commit** 改 `mcp_server.py` + 本表 + `README.md`,然后本地跑 `python scripts/check_doc_sync.py` 自检。
 
 **契约版本同步机制(护栏)**:本 agent 与 mac_coffee 之间的 `MAC_AGENT_CONTRACT_VERSION` 由 `tests/contract_fixtures/mac_coffee_contract.json` 的 `contract_version` 镜像。任一端升级契约版本,**同 release** 必须同步另一端,并跑 `python scripts/check_contract_sync.py --mac-coffee-path <mac_coffee 仓路径>` 确认一致(签名级漂移另由 `test_cross_project_contract.py` 覆盖)。CI 的 `contract-sync` job 仅做 mac-agent 侧 fixture 自检(内网 GitLab 不可从 GitHub Actions 访问 mac_coffee)。
 
