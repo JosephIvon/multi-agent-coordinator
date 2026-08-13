@@ -40,6 +40,18 @@ def test_mcp_extras_remain_on_the_fastmcp_v1_compatibility_line():
         assert mcp_requirements == ["mcp>=1.0,<2"]
 
 
+def test_mcp_extras_cap_pydantic_settings_before_fastmcp_lifespan_warning():
+    extras = _pyproject()["project"]["optional-dependencies"]
+
+    for extra_name in ("mcp", "dev"):
+        settings_requirements = [
+            requirement
+            for requirement in extras[extra_name]
+            if requirement.startswith("pydantic-settings")
+        ]
+        assert settings_requirements == ["pydantic-settings>=2.5.2,<2.15"]
+
+
 def _pytest_asyncio_marked_test_files(test_root: Path) -> list[Path]:
     marker = "pytest.mark." + "asyncio"
     return [
