@@ -45,3 +45,13 @@ table; resolved entries move to the bottom with `Status: resolved`.)
 - **Fix**: `git checkout -- .mcp.json` 恢复配置。
 - **Commit**: `8b3bf84` (2026-08-12)
 - **Status**: resolved
+
+### 3. Async scoring tests depended on an undeclared pytest plugin
+
+- **Issue**: 9 个评分测试使用 `@pytest.mark.asyncio`，但开发依赖不包含
+  `pytest-asyncio`；pytest 将其判为失败并按默认策略重跑，长全量运行看似停滞。
+- **Root cause**: 测试违反 `CLAUDE.md` 的 stdlib `asyncio.run()` 约定。
+- **Fix**: 改用 `asyncio.run()`，并由 release-readiness 测试递归拦截
+  `pytest.mark.asyncio` 的装饰器或模块级用法。
+- **Commit**: `2dd847a` (2026-08-13)
+- **Status**: resolved

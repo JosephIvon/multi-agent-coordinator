@@ -1,7 +1,7 @@
 # MAC-Agent Roadmap
 
 > Version: 1.2.0
-> Date: 2026-08-12
+> Date: 2026-08-13
 > Status: **maintenance mode**
 
 ---
@@ -17,7 +17,7 @@ readiness, conflict records, and packet generation.
 **Python**: 3.10+
 **MCP Tools**: 31
 **CLI Subcommands**: ~40
-**Tests**: 563+
+**Tests**: 566 passed, 1 skipped (latest local validation, no reruns)
 
 ---
 
@@ -84,7 +84,7 @@ Items accepted for upstream maintenance:
 - [x] TaskTransfer network/capability/data grading + lease routing fields
 - [x] Cross-repo contract guard (mac_coffee <-> mac-agent)
 - [x] 7 HIGH priority fixes (version, role param, expire-leases, metrics)
-- [ ] KNOWN_ISSUES.md tracking (template to be established)
+- [x] KNOWN_ISSUES.md tracking template and resolved-issue workflow
 
 ---
 
