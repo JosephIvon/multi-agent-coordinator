@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,9 +14,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build the package and smoke-test the wheel in a clean venv.")
     parser.add_argument("--skip-build", action="store_true", help="Use an existing dist/*.whl instead of building first")
     parser.add_argument(
-        "--resolve-deps",
+        "--fast-local",
         action="store_true",
-        help="Install wheel dependencies from package indexes instead of using the current environment.",
+        help="Use system site-packages and skip dependency resolution for a faster local-only smoke test.",
     )
     args = parser.parse_args(argv)
 
@@ -28,12 +27,12 @@ def main(argv: list[str] | None = None) -> int:
     with tempfile.TemporaryDirectory(prefix="mac-agent-release-") as temp_dir:
         venv = Path(temp_dir) / "venv"
         venv_command = [sys.executable, "-m", "venv"]
-        if not args.resolve_deps:
+        if args.fast_local:
             venv_command.append("--system-site-packages")
         _run([*venv_command, str(venv)])
         python = _venv_python(venv)
         pip_install = [str(python), "-m", "pip", "install", "--timeout", "120", "--retries", "3"]
-        if not args.resolve_deps:
+        if args.fast_local:
             pip_install.append("--no-deps")
         _run([*pip_install, str(wheel)])
         _run([str(python), "-c", "import mac; print(mac.__version__)"])
@@ -62,6 +61,11 @@ def main(argv: list[str] | None = None) -> int:
         _run([str(python), "-c", "from mac.transport.http_ws import create_app; print(create_app.__name__)"])
         if not _venv_script(venv, "mac-http-server").exists():
             raise SystemExit("mac-http-server entry point was not installed")
+
+        _run([*pip_install, f"{wheel}[mcp]"])
+        _run([str(python), "-c", "from mac.mcp_server import mcp; print(mcp.name)"])
+        if not _venv_script(venv, "mac-mcp-server").exists():
+            raise SystemExit("mac-mcp-server entry point was not installed")
 
     return 0
 
@@ -98,13 +102,7 @@ def _venv_python(venv: Path) -> Path:
 def _venv_script(venv: Path, name: str) -> Path:
     suffix = ".exe" if sys.platform == "win32" else ""
     script_dir = venv / ("Scripts" if sys.platform == "win32" else "bin")
-    path = script_dir / f"{name}{suffix}"
-    if path.exists():
-        return path
-    fallback = shutil.which(name)
-    if fallback:
-        return Path(fallback)
-    return path
+    return script_dir / f"{name}{suffix}"
 
 
 if __name__ == "__main__":

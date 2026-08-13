@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+
 try:
     import tomllib  # Python 3.11+ stdlib
 except ImportError:  # pragma: no cover - exercised only on Python 3.10
@@ -13,6 +15,14 @@ from shutil import copy2
 import mac
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _release_smoke_module():
+    spec = importlib.util.spec_from_file_location("release_smoke", ROOT / "scripts" / "release_smoke.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _pyproject() -> dict:
@@ -115,6 +125,7 @@ def test_dev_extra_contains_test_http_and_release_tooling():
     assert any(requirement.startswith("fastapi") for requirement in dev)
     assert any(requirement.startswith("httpx") for requirement in dev)
     assert any(requirement.startswith("build") for requirement in dev)
+    assert any(requirement.startswith("hatchling") for requirement in dev)
     assert any(requirement.startswith("twine") for requirement in dev)
 
 
@@ -122,6 +133,13 @@ def test_project_declares_console_script_entrypoint():
     scripts = _pyproject()["project"]["scripts"]
 
     assert scripts["mac-agent"] == "mac.cli:main"
+
+
+def test_project_declares_all_release_console_entrypoints():
+    scripts = _pyproject()["project"]["scripts"]
+
+    assert scripts["mac-mcp-server"] == "mac.mcp_server:main"
+    assert scripts["mac-http-server"] == "mac.transport.http_ws:main"
 
 
 def test_transport_exports_no_inprocess_wrapper_and_does_not_require_fastapi():
@@ -186,6 +204,55 @@ def test_release_smoke_script_is_documented_and_available():
     assert script.exists()
 
 
+def test_release_smoke_script_covers_mcp_extra_and_entrypoint():
+    source = (ROOT / "scripts" / "release_smoke.py").read_text(encoding="utf-8")
+
+    assert 'f"{wheel}[mcp]"' in source
+    assert 'from mac.mcp_server import mcp' in source
+    assert '_venv_script(venv, "mac-mcp-server")' in source
+
+
+def test_release_smoke_defaults_to_isolated_dependency_resolution(monkeypatch, tmp_path: Path):
+    smoke = _release_smoke_module()
+    commands: list[list[str]] = []
+    wheel = tmp_path / "mac_agent.whl"
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        stdout = '{"risk_level": "low"}' if kwargs.get("capture_output") else ""
+        return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+    def fake_script(_venv, name):
+        path = tmp_path / name
+        path.touch()
+        return path
+
+    monkeypatch.setattr(smoke, "_latest_wheel", lambda: wheel)
+    monkeypatch.setattr(smoke, "_run", fake_run)
+    monkeypatch.setattr(smoke, "_venv_script", fake_script)
+
+    assert smoke.main(["--skip-build"]) == 0
+
+    venv_command = next(command for command in commands if command[:3] == [sys.executable, "-m", "venv"])
+    pip_commands = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert "--system-site-packages" not in venv_command
+    assert all("--no-deps" not in command for command in pip_commands)
+
+    commands.clear()
+    assert smoke.main(["--skip-build", "--fast-local"]) == 0
+
+    venv_command = next(command for command in commands if command[:3] == [sys.executable, "-m", "venv"])
+    pip_commands = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert "--system-site-packages" in venv_command
+    assert all("--no-deps" in command for command in pip_commands)
+
+
+def test_release_smoke_never_falls_back_to_a_global_console_script():
+    source = (ROOT / "scripts" / "release_smoke.py").read_text(encoding="utf-8")
+
+    assert "shutil.which" not in source
+
+
 def test_readme_documents_install_verification_and_build_commands():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -194,6 +261,13 @@ def test_readme_documents_install_verification_and_build_commands():
     assert "python examples/local_handoff.py" in readme
     assert "python examples/local_runner.py" in readme
     assert "python examples/collaboration_plan.py" in readme
+
+
+def test_install_guide_pins_the_current_project_version():
+    project_version = _pyproject()["project"]["version"]
+    install_guide = (ROOT / "docs" / "INSTALL.md").read_text(encoding="utf-8")
+
+    assert f'mac-agent[http,mcp]=={project_version}' in install_guide
 
 
 def test_readme_collaboration_quick_start_commands_are_valid(tmp_path):

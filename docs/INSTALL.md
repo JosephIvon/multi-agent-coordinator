@@ -9,7 +9,7 @@
 ## Install
 
 ```bash
-python -m pip install "mac-agent[http,mcp]==1.1.0"
+python -m pip install "mac-agent[http,mcp]==1.2.0"
 mac-agent --help
 mac-mcp-server --help
 ```
@@ -63,7 +63,7 @@ trusted network/reverse proxy is configured. All routes except `/` require
 5. Run the smoke checks below.
 
 Rollback by reinstalling the prior wheel and restoring the database backup.
-Version 1.0 uses additive schema changes and does not rewrite existing task rows.
+Version 1.2 uses additive schema changes and does not rewrite existing task rows.
 
 ## Release smoke checks
 
@@ -74,3 +74,7 @@ pytest -q
 python -m build --no-isolation
 python scripts/release_smoke.py --skip-build
 ```
+
+The default smoke test creates an isolated virtual environment and resolves the
+wheel's dependencies. Use `--fast-local` only for a quick local import check;
+it deliberately reuses system packages and is not a release gate.
