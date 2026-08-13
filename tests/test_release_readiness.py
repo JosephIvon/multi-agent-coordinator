@@ -40,6 +40,31 @@ def test_mcp_extras_remain_on_the_fastmcp_v1_compatibility_line():
         assert mcp_requirements == ["mcp>=1.0,<2"]
 
 
+def _pytest_asyncio_marked_test_files(test_root: Path) -> list[Path]:
+    marker = "pytest.mark." + "asyncio"
+    return [
+        path.relative_to(test_root)
+        for path in test_root.rglob("test_*.py")
+        if marker in path.read_text(encoding="utf-8")
+    ]
+
+
+def test_pytest_asyncio_guard_detects_nested_module_level_marker(tmp_path: Path):
+    nested_tests = tmp_path / "nested"
+    nested_tests.mkdir()
+    marker = "pytest.mark." + "asyncio"
+    (nested_tests / "test_async.py").write_text(
+        f"import pytest\npytestmark = {marker}\n",
+        encoding="utf-8",
+    )
+
+    assert _pytest_asyncio_marked_test_files(tmp_path) == [Path("nested/test_async.py")]
+
+
+def test_test_suite_uses_stdlib_asyncio_without_pytest_asyncio_markers():
+    assert _pytest_asyncio_marked_test_files(ROOT / "tests") == []
+
+
 def test_doc_sync_rejects_drift_in_spec_and_integrations(tmp_path: Path):
     fixture_root = tmp_path / "repo"
     server_dir = fixture_root / "src" / "mac"

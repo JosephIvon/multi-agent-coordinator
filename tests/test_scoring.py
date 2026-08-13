@@ -1,6 +1,7 @@
 """Tests for mac.scoring + Registry scoring hook (Round 14)."""
 from __future__ import annotations
 
+import asyncio
 import math
 
 import pytest
@@ -260,30 +261,27 @@ def test_scoring_clear_scorers_preserves_async_registry(ledger):
     assert "x" in scoring.list_async_scorers()
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_orders_by_async_scorer(ledger):
+def test_alist_ready_orders_by_async_scorer(ledger):
     _seed_two_tasks(ledger)
     registry = Registry(ledger, scoring_fn=_async_priority_factory())
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-B", "T-A"]
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_without_scorer_returns_natural_order(ledger):
+def test_alist_ready_without_scorer_returns_natural_order(ledger):
     _seed_two_tasks(ledger)
     registry = Registry(ledger)
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-A", "T-B"]
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_via_string_name_resolves_async(ledger):
+def test_alist_ready_via_string_name_resolves_async(ledger):
     _seed_two_tasks(ledger)
     scoring.register_async_scorer("async_priority", _async_priority_factory())
     registry = Registry(ledger, scoring_fn="async_priority")
     assert registry._async_scoring_fn is not None
     assert registry._scoring_fn is None
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-B", "T-A"]
 
 
@@ -294,8 +292,7 @@ def test_list_ready_tasks_raises_typeerror_for_async_scorer(ledger):
         registry.list_ready_tasks(project_context="demo")
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_cache_hits_skip_scorer_invocations(ledger):
+def test_alist_ready_cache_hits_skip_scorer_invocations(ledger):
     _seed_two_tasks(ledger)
     counter = {"calls": 0}
 
@@ -304,14 +301,14 @@ async def test_alist_ready_cache_hits_skip_scorer_invocations(ledger):
         return float(task.priority)
 
     registry = Registry(ledger, scoring_fn=counting_scorer)
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     info1 = registry.scoring_cache_info()
     assert counter["calls"] == 2
     assert info1.misses == 2
     assert info1.hits == 0
 
     # Second call - everything should come from cache.
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     info2 = registry.scoring_cache_info()
     assert counter["calls"] == 2
     assert info2.misses == 2
@@ -319,8 +316,7 @@ async def test_alist_ready_cache_hits_skip_scorer_invocations(ledger):
     assert info2.currsize == 2
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_cache_respects_ttl(ledger, monkeypatch):
+def test_alist_ready_cache_respects_ttl(ledger, monkeypatch):
     _seed_two_tasks(ledger)
     counter = {"calls": 0}
 
@@ -333,15 +329,14 @@ async def test_alist_ready_cache_respects_ttl(ledger, monkeypatch):
     registry = Registry(
         ledger, scoring_fn=counting_scorer, scoring_cache_ttl_seconds=5.0
     )
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert counter["calls"] == 2
     fake_now["t"] += 10.0
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert counter["calls"] == 4
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_cache_invalidated_by_set_scoring_fn(ledger):
+def test_alist_ready_cache_invalidated_by_set_scoring_fn(ledger):
     _seed_two_tasks(ledger)
     counter1 = {"calls": 0}
     counter2 = {"calls": 0}
@@ -355,7 +350,7 @@ async def test_alist_ready_cache_invalidated_by_set_scoring_fn(ledger):
         return 10.0
 
     registry = Registry(ledger, scoring_fn=scorer_a)
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert counter1["calls"] == 2
     assert counter2["calls"] == 0
 
@@ -363,24 +358,22 @@ async def test_alist_ready_cache_invalidated_by_set_scoring_fn(ledger):
     info = registry.scoring_cache_info()
     assert info.currsize == 0
     assert info.hits == 0
-    await registry.alist_ready_tasks(project_context="demo")
+    asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert counter2["calls"] == 2
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_handles_scorer_returning_nan(ledger):
+def test_alist_ready_handles_scorer_returning_nan(ledger):
     _seed_two_tasks(ledger)
 
     async def nan_scorer(task):
         return float("nan")
 
     registry = Registry(ledger, scoring_fn=nan_scorer)
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-A", "T-B"]
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_handles_scorer_raising(ledger):
+def test_alist_ready_handles_scorer_raising(ledger):
     _seed_two_tasks(ledger)
 
     async def flaky(task):
@@ -389,19 +382,18 @@ async def test_alist_ready_handles_scorer_raising(ledger):
         return 5.0
 
     registry = Registry(ledger, scoring_fn=flaky)
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-B", "T-A"]
 
 
-@pytest.mark.asyncio
-async def test_alist_ready_handles_scorer_returning_none(ledger):
+def test_alist_ready_handles_scorer_returning_none(ledger):
     _seed_two_tasks(ledger)
 
     async def none_scorer(task):
         return None
 
     registry = Registry(ledger, scoring_fn=none_scorer)
-    ready = await registry.alist_ready_tasks(project_context="demo")
+    ready = asyncio.run(registry.alist_ready_tasks(project_context="demo"))
     assert [t.task_id for t in ready] == ["T-A", "T-B"]
 
 

@@ -88,6 +88,7 @@ src/mac/
 | K-004 | `starlette` 1.3.x 在 `starlette.testclient` 导入时抛 `StarletteDeprecationWarning`(httpx 0.27 弃用 `app=` 参数,starlette 仍用旧签名) | ✅ 已修 | `pyproject.toml` 的 `dev`/`http` extra 锁 `starlette<1.3`,`filterwarnings` 留作兜底;starlette 完成 httpx2 迁移后可移除两者 |
 | K-005 | `tests/test_storage.py::test_audit_trail_lookup_stays_fast_with_many_other_rows` 对冷盘/Windows AV 扫描敏感,单次采样易 flaky | ✅ 已修 | 改为 warmup + 中位数(5 次采样)+ `<200ms` 环境敏感阈值;CI 另加 `--reruns 2` 兜底 |
 | K-006 | 未设置上界的 `mcp>=1.0` 会解析到 MCP 2.x；该版本移除了 v1 的 `mcp.server.fastmcp` 导入路径，导致 MCP 测试在收集阶段失败 | ✅ 已修 | v1.2 固定 `mcp>=1.0,<2`；升级 2.x 前须完成服务端与契约测试的迁移 |
+| K-007 | `@pytest.mark.asyncio` 需要额外插件；本仓不安装该插件时，异步评分测试会先失败再被重跑，长全量运行表现为停滞 | ✅ 已修 | 测试统一用 `asyncio.run()`；release-readiness 守卫禁止重新引入该 marker |
 
 新踩到的:**同格式追加一行**(就追加,别再开 `KNOWN_ISSUES.md` 文件)。
 
