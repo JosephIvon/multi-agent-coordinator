@@ -50,6 +50,35 @@
 - New regression tests for every fix above (H-1/H-2, M-1/M-2, M-3);
   suite is now 583 collected tests.
 
+## [1.2.1] - 2026-08-18
+
+### Maintenance
+
+- **Repo hygiene** — stop tracking the 200 704-byte orphan sqlite3 file
+  `mac.db.r2-history` (left over from a 2026-07-31 multica-bridge run; no
+  PII, no secrets, but local runtime state that should never have been
+  in the repo) and the byte-identical `.claude/settings.json.backup`
+  editor backup. Both were accidentally added in commit `e0fe1d3`
+  (2026-08-06). Local working copies are preserved with `git rm --cached`
+  in case any in-flight patch references them. See KNOWN_ISSUES.md #1
+  for the full write-up.
+- **`.gitignore` hardening** — add `*.db.*` so any sqlite-history /
+  shadow / sidecar variant (e.g. `mac.db.r2-history`,
+  `report.db.r2-history`, `cache.db.shadow`) is ignored going forward.
+- **Docs sync** — ROADMAP.md updated with code-enumerated counts: 31
+  MCP tools (4 resources), 50 CLI subcommands, 573 tests passed and 1
+  skipped. `python scripts/check_doc_sync.py` still passes.
+
+### Notes
+
+- No protocol, schema, or public API change. `mac_coffee` consumers do
+  not need to bump their `mac-agent>=1.1,<2` pin.
+- Cross-project contract version remains `1`; `tests/test_cross_project_contract.py`
+  and the dual fixtures in `tests/contract_fixtures/` and
+  `mac_coffee/tests/contract_fixtures/` are unchanged.
+- `KNOWN_ISSUES.md` entry #1 is now resolved and moved to the Resolved
+  section.
+
 ## [1.2.0] - 2026-08-05
 
 ### Added

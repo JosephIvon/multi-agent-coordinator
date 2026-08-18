@@ -23,9 +23,40 @@ table; resolved entries move to the bottom with `Status: resolved`.)
 
 ## Entries
 
-### (none yet)
+### (none open)
 
 ## Resolved
+
+### 1. `mac.db.r2-history` and `.claude/settings.json.backup` accidentally tracked
+
+- **Issue**: Commit `e0fe1d3` ("fix: 7 HIGH priority issues — version, role
+  param, expire-leases, metrics", 2026-08-06) added two files that
+  should not be in the repository:
+  - `mac.db.r2-history`: a 200 704-byte SQLite file holding a 2026-07-31
+    `multica-bridge` run (90 rows across `audit_entries`,
+    `conflict_records`, `handoff_results`, `quality_results`,
+    `task_transfers`). No PII, no secrets, no local paths, but it is
+    local runtime state — the kind of artefact that a clean-room rule
+    should never let through.
+  - `.claude/settings.json.backup`: byte-for-byte identical to the live
+    `.claude/settings.json`; an editor backup that was left next to
+    its source.
+- **Root cause**: `.gitignore` covered `*.db`, `*.db-journal`,
+  `*.db-wal`, `*.db-shm`, and a literal `mac.db` entry — but not
+  `*.db.*` style sidecars. A 7-issue fix commit on a hot day
+  (`e0fe1d3`) committed the orphan database without noticing the
+  unmatched pattern. The backup file came along in the same commit.
+- **Fix landed in release-audit-1.2.1**:
+  - `7c913fe` (`.gitignore`): added `*.db.*` so future variants cannot
+    sneak in.
+  - `be7ce0a` (`chore(repo): stop tracking …`): `git rm --cached` for
+    both files; local working copies preserved.
+  - `1.2.1` CHANGELOG entry records the resolution.
+- **Status**: resolved (2026-08-18, commit `be7ce0a` on branch
+  `release-audit-1.2.1`). The original 1.2.0 baseline commit
+  `e0fe1d3` is preserved in git history for traceability.
+
+## Resolved (historical)
 
 ### 1. `mac_save_to_vault` UnboundLocalError in Phase 3
 
