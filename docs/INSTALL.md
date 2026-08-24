@@ -1,4 +1,4 @@
-﻿# MAC 1.0 Installation and Upgrade Guide
+﻿# MAC Installation and Upgrade Guide
 
 ## Requirements
 

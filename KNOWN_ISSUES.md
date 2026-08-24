@@ -51,8 +51,9 @@ table; resolved entries move to the bottom with `Status: resolved`.)
 - **Fix landed in release-audit-1.2.1**:
   - `7c913fe` (`.gitignore`): added `*.db.*` so future variants cannot
     sneak in.
-  - `be7ce0a` (`chore(repo): stop tracking …`): `git rm --cached` for
-    both files; local working copies preserved.
+  - `be7ce0a` (`chore(repo): stop tracking …`): stopped Git tracking
+    both files. Runtime or local copies, if present, remain local and
+    are not distributed with the package.
   - `1.2.1` CHANGELOG entry records the resolution.
 - **Status**: resolved (2026-08-18, commit `be7ce0a` on branch
   `release-audit-1.2.1`). The original 1.2.0 baseline commit

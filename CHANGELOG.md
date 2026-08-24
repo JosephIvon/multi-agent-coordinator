@@ -1,5 +1,6 @@
 # Changelog
 
+<<<<<<< HEAD
 ## [Unreleased]
 
 ### Fixed (third-party review follow-ups, 2026-08-25)
@@ -51,6 +52,11 @@
   suite is now 583 collected tests.
 
 ## [1.2.1] - 2026-08-18
+||||||| parent of 9e674b3 (docs(release): correct final 1.2.1 publication facts)
+## [1.2.1] - 2026-08-18
+=======
+## [1.2.1] - 2026-08-24
+>>>>>>> 9e674b3 (docs(release): correct final 1.2.1 publication facts)
 
 ### Maintenance
 
@@ -61,9 +67,9 @@
   The base Git blobs were not byte-identical: the backup was 114 bytes
   versus 113 bytes for `.claude/settings.json`, differing only by the
   backup's final LF (no additional settings or functional difference).
-  Both were accidentally added in commit `e0fe1d3`
-  (2026-08-06). Local working copies are preserved with `git rm --cached`
-  in case any in-flight patch references them. See KNOWN_ISSUES.md #4
+  Both were accidentally added in commit `e0fe1d3` (2026-08-06). Git no
+  longer tracks either file; runtime or local copies, if present, remain
+  local and are not distributed with the package. See KNOWN_ISSUES.md #4
   for the full write-up.
 - **`.gitignore` hardening** — add `*.db.*` so any sqlite-history /
   shadow / sidecar variant (e.g. `mac.db.r2-history`,
