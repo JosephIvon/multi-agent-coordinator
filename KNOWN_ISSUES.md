@@ -27,7 +27,7 @@ table; resolved entries move to the bottom with `Status: resolved`.)
 
 ## Resolved
 
-### 1. `mac.db.r2-history` and `.claude/settings.json.backup` accidentally tracked
+### 4. `mac.db.r2-history` and `.claude/settings.json.backup` accidentally tracked
 
 - **Issue**: Commit `e0fe1d3` ("fix: 7 HIGH priority issues — version, role
   param, expire-leases, metrics", 2026-08-06) added two files that
@@ -38,9 +38,11 @@ table; resolved entries move to the bottom with `Status: resolved`.)
     `task_transfers`). No PII, no secrets, no local paths, but it is
     local runtime state — the kind of artefact that a clean-room rule
     should never let through.
-  - `.claude/settings.json.backup`: byte-for-byte identical to the live
-    `.claude/settings.json`; an editor backup that was left next to
-    its source.
+  - `.claude/settings.json.backup`: an editor backup left next to its
+    source. The base Git blobs were not byte-for-byte identical: the
+    backup was 114 bytes versus 113 bytes for `.claude/settings.json`,
+    differing only by the backup's final LF. It contained no additional
+    settings and had no functional difference.
 - **Root cause**: `.gitignore` covered `*.db`, `*.db-journal`,
   `*.db-wal`, `*.db-shm`, and a literal `mac.db` entry — but not
   `*.db.*` style sidecars. A 7-issue fix commit on a hot day
@@ -55,8 +57,6 @@ table; resolved entries move to the bottom with `Status: resolved`.)
 - **Status**: resolved (2026-08-18, commit `be7ce0a` on branch
   `release-audit-1.2.1`). The original 1.2.0 baseline commit
   `e0fe1d3` is preserved in git history for traceability.
-
-## Resolved (historical)
 
 ### 1. `mac_save_to_vault` UnboundLocalError in Phase 3
 

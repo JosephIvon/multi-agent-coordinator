@@ -1,12 +1,12 @@
 # MAC-Agent Roadmap
 
-> Version: 1.2.0
+> Version: 1.2.1
 > Date: 2026-08-13
 > Status: **maintenance mode**
 
 ---
 
-## Current State (v1.2.0)
+## Current State (v1.2.1)
 
 MAC-Agent is a lightweight coordination ledger for AI coding agents. It provides
 shared task state, context handoff, quality evidence, plan grouping, dependency

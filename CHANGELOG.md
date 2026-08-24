@@ -57,10 +57,13 @@
 - **Repo hygiene** — stop tracking the 200 704-byte orphan sqlite3 file
   `mac.db.r2-history` (left over from a 2026-07-31 multica-bridge run; no
   PII, no secrets, but local runtime state that should never have been
-  in the repo) and the byte-identical `.claude/settings.json.backup`
-  editor backup. Both were accidentally added in commit `e0fe1d3`
+  in the repo) and the `.claude/settings.json.backup` editor backup.
+  The base Git blobs were not byte-identical: the backup was 114 bytes
+  versus 113 bytes for `.claude/settings.json`, differing only by the
+  backup's final LF (no additional settings or functional difference).
+  Both were accidentally added in commit `e0fe1d3`
   (2026-08-06). Local working copies are preserved with `git rm --cached`
-  in case any in-flight patch references them. See KNOWN_ISSUES.md #1
+  in case any in-flight patch references them. See KNOWN_ISSUES.md #4
   for the full write-up.
 - **`.gitignore` hardening** — add `*.db.*` so any sqlite-history /
   shadow / sidecar variant (e.g. `mac.db.r2-history`,
@@ -76,7 +79,7 @@
 - Cross-project contract version remains `1`; `tests/test_cross_project_contract.py`
   and the dual fixtures in `tests/contract_fixtures/` and
   `mac_coffee/tests/contract_fixtures/` are unchanged.
-- `KNOWN_ISSUES.md` entry #1 is now resolved and moved to the Resolved
+- `KNOWN_ISSUES.md` entry #4 is now resolved and moved to the Resolved
   section.
 
 ## [1.2.0] - 2026-08-05
