@@ -1,10 +1,8 @@
 """Tests for MAC_DB_PATH env var resolution in mcp_server and CLI."""
 from __future__ import annotations
 
-import os
+import sys
 from pathlib import Path
-
-import pytest
 
 from mac.mcp_server import _resolve_db_path
 
@@ -31,13 +29,17 @@ def test_resolve_db_path_env_var_unset(monkeypatch):
 
 
 def test_resolve_db_path_absolute_path(monkeypatch):
-    """_resolve_db_path should handle absolute paths correctly."""
-    monkeypatch.setenv("MAC_DB_PATH", r"C:\tmp\collab-smoke\mac.db")
+    """_resolve_db_path should handle absolute paths correctly (platform-native)."""
+    if sys.platform == "win32":
+        raw = r"C:\tmp\collab-smoke\mac.db"
+    else:
+        raw = "/tmp/collab-smoke/mac.db"
+    monkeypatch.setenv("MAC_DB_PATH", raw)
     import mac.mcp_server as mod
 
     mod._DB_PATH = None
     result = _resolve_db_path()
-    assert result == Path(r"C:\tmp\collab-smoke\mac.db")  # .resolve() keeps absolute paths
+    assert result == Path(raw)  # .resolve() keeps absolute paths
 
 
 def test_resolve_db_path_does_not_yield_none(monkeypatch):

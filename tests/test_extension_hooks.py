@@ -6,7 +6,16 @@ mac.extensions hooks at the right times with the right arguments.
 
 import tempfile
 
-import pytest
+from mac.extensions import Extension, register, reset
+from mac.protocol.messages import (
+    AgentCapability,
+    AgentCard,
+    TaskPayload,
+    TaskTransfer,
+)
+from mac.registry import Registry
+from mac.storage import SQLiteTaskLedger
+from mac.testing.contracts import TestContract
 
 
 def _temp_db() -> str:
@@ -20,18 +29,6 @@ def _temp_db() -> str:
     path = handle.name
     handle.close()
     return path
-
-from mac.extensions import Extension, register, reset
-from mac.protocol.messages import (
-    AgentCapability,
-    AgentCard,
-    ContextBundle,
-    TaskPayload,
-    TaskTransfer,
-)
-from mac.registry import Registry
-from mac.storage import SQLiteTaskLedger
-from mac.testing.contracts import TestContract
 
 
 def _task(task_id: str, *, capability: str = "write_code", status: str = "proposed", **updates) -> TaskTransfer:
@@ -348,15 +345,13 @@ def test_hook_error_does_not_block_operation():
 
 def test_invoke_hook_when_extensions_not_available(monkeypatch):
     """_invoke_hook silently returns when mac.extensions cannot be imported."""
+
     from mac import registry as registry_mod
-    import sys as _sys
 
     db_path = _temp_db()
     registry = Registry(SQLiteTaskLedger(db_path))
 
     # Simulate mac.extensions being unavailable by patching _invoke_hook's import
-    original_invoke = registry_mod.Registry._invoke_hook
-
     def safe_invoke(name: str, **kwargs):
         """Simulate _invoke_hook when mac.extensions doesn't exist."""
         try:

@@ -68,3 +68,9 @@ active/
 
 # UV lock file (local, not shared)
 uv.lock
+
+# Codegraph index (local, per-machine)
+.codegraph/
+
+# Per-agent workflow notes (local, not shared)
+.agent.md
