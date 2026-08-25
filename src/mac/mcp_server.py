@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -49,12 +50,10 @@ def _resolve_db_path() -> Path:
         raw = os.environ.get("MAC_DB_PATH", "mac.db")
         resolved = Path(raw).resolve()
         # Ensure the parent directory exists so SQLite doesn't fail silently.
-        try:
+        # Read-only filesystem / network path etc. — let SQLite surface the
+        # error later with a clear message.
+        with contextlib.suppress(OSError):
             resolved.parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            # Read-only filesystem, network path, etc. — let SQLite surface
-            # the error later with a clear message.
-            pass
         _DB_PATH = resolved
     return _DB_PATH
 
@@ -883,11 +882,11 @@ def mac_search_vault(
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            raise ToolError(f"obsidian_search: HTTP {e.code} — is the Obsidian REST API plugin running?")
+            raise ToolError(f"obsidian_search: HTTP {e.code} — is the Obsidian REST API plugin running?") from e
         except urllib.error.URLError as e:
-            raise ToolError(f"obsidian_search: connection failed ({e.reason}) — is Obsidian running?")
-        except json.JSONDecodeError:
-            raise ToolError("obsidian_search: unexpected response format from vault API")
+            raise ToolError(f"obsidian_search: connection failed ({e.reason}) — is Obsidian running?") from e
+        except json.JSONDecodeError as e:
+            raise ToolError("obsidian_search: unexpected response format from vault API") from e
 
     return _safe_call(_do)
 
@@ -971,9 +970,9 @@ def mac_save_to_vault(
             with urllib.request.urlopen(req, timeout=10) as resp:
                 return json.dumps({"saved": vault_path, "status": resp.status})
         except urllib.error.HTTPError as e:
-            raise ToolError(f"obsidian_save: HTTP {e.code} — {e.reason}")
+            raise ToolError(f"obsidian_save: HTTP {e.code} — {e.reason}") from e
         except urllib.error.URLError as e:
-            raise ToolError(f"obsidian_save: connection failed ({e.reason}) — is Obsidian running?")
+            raise ToolError(f"obsidian_save: connection failed ({e.reason}) — is Obsidian running?") from e
 
     return _safe_call(_do)
 

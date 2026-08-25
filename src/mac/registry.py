@@ -1615,11 +1615,10 @@ class Registry:
                 # (open to all) OR match the caller's specified role.
                 if task.required_role is not None and task.required_role != role:
                     continue
-            elif task.required_role is not None:
+            elif task.required_role is not None and task.required_role not in agent_roles:
                 # No explicit role from caller: check if agent's roles include
                 # the task's required_role.
-                if task.required_role not in agent_roles:
-                    continue
+                continue
             # ── Capability gate ─────────────────────────────────────
             required_capability = _required_capability(task)
             if not best_effort and required_capability != capability:
