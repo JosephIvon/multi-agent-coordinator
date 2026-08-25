@@ -29,12 +29,24 @@ def test_resolve_db_path_env_var_unset(monkeypatch):
 
 def test_resolve_db_path_absolute_path(monkeypatch):
     """_resolve_db_path should handle absolute paths correctly."""
-    monkeypatch.setenv("MAC_DB_PATH", r"C:\tmp\collab-smoke\mac.db")
-    import mac.mcp_server as mod
+    import sys
 
-    mod._DB_PATH = None
-    result = _resolve_db_path()
-    assert result == Path(r"C:\tmp\collab-smoke\mac.db")  # .resolve() keeps absolute paths
+    if sys.platform == "win32":
+        raw = r"C:\tmp\collab-smoke\mac.db"
+        monkeypatch.setenv("MAC_DB_PATH", raw)
+        import mac.mcp_server as mod
+
+        mod._DB_PATH = None
+        assert _resolve_db_path() == Path(raw)
+    else:
+        # On POSIX a Windows-style path is not absolute; .resolve() anchors
+        # it under cwd. Assert the resolved (absolute) form instead.
+        raw = "/tmp/collab-smoke/mac.db"
+        monkeypatch.setenv("MAC_DB_PATH", raw)
+        import mac.mcp_server as mod
+
+        mod._DB_PATH = None
+        assert _resolve_db_path() == Path(raw).resolve()
 
 
 def test_resolve_db_path_does_not_yield_none(monkeypatch):

@@ -4,6 +4,7 @@ Tests that the hook invocation points in Registry correctly call
 mac.extensions hooks at the right times with the right arguments.
 """
 
+import os
 import tempfile
 
 from mac.extensions import Extension, register, reset
@@ -19,16 +20,13 @@ from mac.testing.contracts import TestContract
 
 
 def _temp_db() -> str:
-    """Return a path to a not-yet-created temp .db file, closing the handle.
+    """Return a path to a not-yet-created temp .db file.
 
-    ``NamedTemporaryFile(delete=False)`` keeps the file open until GC, which
-    triggers a ResourceWarning at test teardown. Closing immediately lets SQLite
-    create the file itself and keeps the warnings summary clean.
+    The path is derived from ``gettempdir`` without creating (or opening)
+    the file: SQLite creates it on first connect, so no handle lingers and
+    the warnings summary stays clean.
     """
-    handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
-    path = handle.name
-    handle.close()
-    return path
+    return os.path.join(tempfile.gettempdir(), f"mac_hook_test_{os.getpid()}_{id(object())}.db")
 
 
 def _task(task_id: str, *, capability: str = "write_code", status: str = "proposed", **updates) -> TaskTransfer:
