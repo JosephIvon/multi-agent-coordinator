@@ -33,13 +33,16 @@ def test_resolve_db_path_absolute_path(monkeypatch):
     if sys.platform == "win32":
         raw = r"C:\tmp\collab-smoke\mac.db"
     else:
+        # macOS resolves /tmp to /private/tmp, so compare against the
+        # resolved form rather than the raw string.
         raw = "/tmp/collab-smoke/mac.db"
     monkeypatch.setenv("MAC_DB_PATH", raw)
     import mac.mcp_server as mod
 
     mod._DB_PATH = None
     result = _resolve_db_path()
-    assert result == Path(raw)  # .resolve() keeps absolute paths
+    assert result == Path(raw).resolve()
+    assert result.is_absolute()
 
 
 def test_resolve_db_path_does_not_yield_none(monkeypatch):
