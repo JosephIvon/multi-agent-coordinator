@@ -1,10 +1,7 @@
 """Tests for MAC_DB_PATH env var resolution in mcp_server and CLI."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
-
-import pytest
 
 from mac.mcp_server import _resolve_db_path
 

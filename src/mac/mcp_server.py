@@ -23,6 +23,19 @@ mcp = FastMCP("mac-coordinator")
 
 _DB_PATH: Path | None = None
 
+# ---------------------------------------------------------------------------
+# Process-wide Registry shared by every MCP tool
+# ---------------------------------------------------------------------------
+#
+# MCP tool calls are stateful through one memoised Registry — most notably
+# the scoring hook installed by mac_set_scorer must be observed by later
+# mac_list_ready_tasks calls, so tools cannot each get a fresh instance.
+# mac_test_scorer deliberately builds its own throwaway Registry so dry-runs
+# never mutate the live hook or its cache. Tests redirect the memo via the
+# _LONG_REGISTRY / _DB_PATH module attributes.
+
+_LONG_REGISTRY: Registry | None = None
+
 
 def _resolve_db_path() -> Path:
     """Resolve the SQLite DB path from ``MAC_DB_PATH`` env var, or default.
@@ -46,9 +59,20 @@ def _resolve_db_path() -> Path:
     return _DB_PATH
 
 
+def _long_registry() -> Registry:
+    # Memoised Registry shared by every tool in this process.
+    global _LONG_REGISTRY
+    if _LONG_REGISTRY is None:
+        _LONG_REGISTRY = Registry(SQLiteTaskLedger(_DB_PATH))
+    return _LONG_REGISTRY
+
+
 def _registry() -> Registry:
-    """Create a Registry backed by the default SQLite ledger."""
-    return Registry(SQLiteTaskLedger(_DB_PATH))
+    """Return the process-wide Registry used by every MCP tool.
+
+    See the comment block near ``_LONG_REGISTRY`` for why this is memoised.
+    """
+    return _long_registry()
 
 
 def _serialize(result: Any) -> str:

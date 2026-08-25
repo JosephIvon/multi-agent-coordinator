@@ -68,3 +68,4 @@ active/
 
 # UV lock file (local, not shared)
 uv.lock
+mac.db.r2-history

@@ -623,8 +623,8 @@ LLM clients (Claude Code, Cursor, etc.) use `isError` to decide retry/strategy. 
 | `mac_expire_stale_agents` | Mark stale agents offline |
 | `mac_cleanup_tasks` | Delete terminal tasks |
 | `mac_get_task` | Get task details by ID |
-| `mac_retry_task` | Retry a failed task → proposed |
-| `mac_resume_blocked_task` | Resolve blocker → proposed |
+| `mac_retry_task` | Retry a failed task → proposed (increments `retry_count`) |
+| `mac_resume_blocked_task` | Resolve blocker → proposed (starts a new attempt: increments `retry_count`) |
 | `mac_cancel_task` | Cancel a task (terminal) |
 
 #### Scoring (3)

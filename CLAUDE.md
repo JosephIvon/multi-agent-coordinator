@@ -12,7 +12,7 @@
 - **核心栈**:Python stdlib + pydantic ≥ 2.0 + 可选 fastapi(http)/ mcp(mcp)
 - **存储**:SQLite WAL,单实例强一致;多实例在 Phase 2
 - **状态机**:`proposed → accepted → running → completed`(另含 `review_ready` / `rejected` / `failed` / `cancelled` / `superseded`;`review_ready` 仅 `require_review=True` 时启用)
-- **测试**:pytest 580+ 用例(详见 [`README.md`](README.md)/ [`docs/SPEC.md`](docs/SPEC.md)),跑 `python -m pytest tests/ -q`
+- **测试**:pytest 583 用例(详见 [`README.md`](README.md)/ [`docs/SPEC.md`](docs/SPEC.md)),跑 `python -m pytest tests/ -q`
 
 ---
 

@@ -1,5 +1,55 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed (third-party review follow-ups, 2026-08-25)
+
+- **H-1 `mac_set_scorer` had no effect on MCP task listing:** the scorer was
+  installed on a private long-lived `Registry` while `mac_list_ready_tasks`
+  (and every other tool) built a fresh `Registry` per call. All MCP tools now
+  share one memoised process-wide Registry, so the installed scorer actually
+  reorders tool-visible results. `mac_test_scorer` still uses a throwaway
+  Registry so dry-runs never mutate the live hook.
+- **H-2 `mac_list_agents(status=...)` filter was a no-op:** filtering ran
+  after `discover()`'s default `status="online"`, so `status="offline"`
+  always returned `[]` and `status="all"` only ever returned online agents.
+  The tool now fetches all agents first and filters afterwards.
+- **M-1 `mac_record_quality_and_complete` gated on stale evidence:** it now
+  filters quality results to the current attempt (same bucketing as
+  `done()`/`complete_task`), so passed results from an earlier attempt can no
+  longer complete a retry with no fresh evidence.
+- **M-2 `resume_blocked_task` did not start a new attempt:** it now increments
+  `retry_count` (same as `retry_task`), keeping the blocked attempt's quality
+  results out of the current-attempt gate.
+- **M-3 terminal-state writers now use status CAS:** `fail_task`,
+  `cancel_task`, `block_task`, `resume_blocked_task`, and `retry_task`
+  previously blind-wrote after a read, so a late expiry sweep could overwrite
+  a just-completed task. All of them now write through
+  `save_task_transfer(expected_status=...)` and surface
+  `StateConflictError` on a lost race; the TTL/lease expiry loops swallow
+  that conflict and keep the newer state. `claim_callback` also handles the
+  concurrent-INSERT race (primary-key `IntegrityError`) as duplicate/conflict
+  instead of crashing. `done()` now refuses non-running tasks up front so
+  quality evidence is not persisted for a task that can never consume it.
+- **M-4 `mac_expire_stale_tasks` docstring drift:** the tool docstring
+  claimed `proposed` tasks were scanned; they never were and never should be
+  (proposed = waiting to be claimed, not abandoned mid-flight). Docstring
+  corrected to match SPEC §B-3.
+
+### Maintenance
+
+- L-1: `ruff check src/ tests/` and `mypy src/mac/` both pass clean
+  (previously 19 ruff errors / 12 mypy errors; CI's mypy step was
+  `continue-on-error`).
+- L-2: kanban labels are now English (`To write` / `In progress` /
+  `Awaiting review` / `Completed today`) in both `get_kanban()` and the CLI
+  pretty-printer, matching the English documentation of `mac://kanban`.
+- L-3: `mac.db.r2-history` (real ledger residue) removed from git tracking
+  and ignored.
+- L-7: CLAUDE.md test count corrected to the actual 583.
+- New regression tests for every fix above (H-1/H-2, M-1/M-2, M-3);
+  suite is now 583 collected tests.
+
 ## [1.2.0] - 2026-08-05
 
 ### Added

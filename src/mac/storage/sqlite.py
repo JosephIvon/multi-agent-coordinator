@@ -97,29 +97,60 @@ class SQLiteTaskLedger:
             agents.append(_from_dict("AgentCard", json.loads(row["payload"])))
         return agents
 
-    def save_task_transfer(self, task: Any) -> None:
+    def save_task_transfer(self, task: Any, *, expected_status: str | None = None) -> None:
+        """Upsert a task row, optionally guarded by a status CAS.
+
+        With ``expected_status`` the update is a compare-and-swap: it only
+        applies when the stored row still has that status, raising
+        :class:`StatusConflict` otherwise. Terminal-state writers
+        (fail / cancel / block / resume / retry) use this so a stale
+        read-modify-write can never overwrite a concurrent transition.
+        """
         data = _to_dict(task)
         task_id = data["task_id"]
         with self._connect() as conn:
-            conn.execute(
+            if expected_status is None:
+                conn.execute(
+                    """
+                    INSERT INTO task_transfers (
+                        task_id, status, project_context, payload, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(task_id) DO UPDATE SET
+                        status = excluded.status,
+                        project_context = excluded.project_context,
+                        payload = excluded.payload,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        task_id,
+                        data.get("status"),
+                        data.get("project_context"),
+                        _json(data),
+                        _now(),
+                    ),
+                )
+                return
+            cursor = conn.execute(
                 """
-                INSERT INTO task_transfers (
-                    task_id, status, project_context, payload, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(task_id) DO UPDATE SET
-                    status = excluded.status,
-                    project_context = excluded.project_context,
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
+                UPDATE task_transfers
+                SET status = ?, project_context = ?, payload = ?, updated_at = ?
+                WHERE task_id = ? AND status = ?
                 """,
                 (
-                    task_id,
                     data.get("status"),
                     data.get("project_context"),
                     _json(data),
                     _now(),
+                    task_id,
+                    expected_status,
                 ),
             )
+            if cursor.rowcount != 1:
+                actual = conn.execute(
+                    "SELECT status FROM task_transfers WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                actual_status = actual["status"] if actual is not None else "<missing>"
+                raise StatusConflict(task_id, expected_status, actual_status)
 
     def get_task_transfer(self, task_id: str) -> Any | None:
         row = self._fetch_one("SELECT payload FROM task_transfers WHERE task_id = ?", task_id)
@@ -422,15 +453,29 @@ class SQLiteTaskLedger:
         return [SessionState.from_dict(json.loads(row["payload"])) for row in rows]
 
     def claim_callback(self, event_id: str, payload_hash: str) -> str:
-        """Atomically claim a callback event: new, duplicate, or conflict."""
+        """Atomically claim a callback event: new, duplicate, or conflict.
+
+        The insert is guarded by the primary key: two concurrent claims of
+        the same ``event_id`` resolve to duplicate/conflict instead of one
+        caller crashing on IntegrityError.
+        """
         with self._connect() as conn:
             row = conn.execute("SELECT payload_hash FROM callback_events WHERE event_id = ?", (event_id,)).fetchone()
             if row is not None:
                 return "duplicate" if row["payload_hash"] == payload_hash else "conflict"
-            conn.execute(
-                "INSERT INTO callback_events(event_id, payload_hash, status, created_at) VALUES (?, ?, 'processing', ?)",
-                (event_id, payload_hash, _now()),
-            )
+            try:
+                conn.execute(
+                    "INSERT INTO callback_events(event_id, payload_hash, status, created_at) VALUES (?, ?, 'processing', ?)",
+                    (event_id, payload_hash, _now()),
+                )
+            except sqlite3.IntegrityError:
+                # Lost an insert race: re-read to classify the winner's payload.
+                row = conn.execute(
+                    "SELECT payload_hash FROM callback_events WHERE event_id = ?", (event_id,)
+                ).fetchone()
+                if row is None:
+                    raise
+                return "duplicate" if row["payload_hash"] == payload_hash else "conflict"
             return "new"
 
     def abort_callback(self, event_id: str) -> None:

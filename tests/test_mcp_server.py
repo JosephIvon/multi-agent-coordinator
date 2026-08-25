@@ -98,7 +98,10 @@ def _use_tmp_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import mac.mcp_server as mod
 
     monkeypatch.setattr(mod, "_DB_PATH", db_path)
-    # Also patch _registry to use the tmp db so all tools share the same ledger
+    # _registry() is memoised process-wide (so runtime state like the
+    # scoring hook sticks across tool calls); reset the memo per test so
+    # tests are isolated and all tools share one ledger.
+    monkeypatch.setattr(mod, "_LONG_REGISTRY", None)
     _orig_registry = mod._registry
 
     def _patched_registry() -> Registry:

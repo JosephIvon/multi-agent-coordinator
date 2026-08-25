@@ -100,3 +100,14 @@ def test_test_scorer_does_not_pollute_long_registry(tmp_db, seed_proposed):
     ranked = [t.task_id for t in long_registry.list_ready_tasks()]
     assert ranked[0] == "t-fresh"
 
+
+def test_set_scorer_is_visible_to_subsequent_tool_calls(tmp_db, seed_proposed):
+    # Regression (H-1): mac_set_scorer used to install the hook on a
+    # private long-lived Registry while mac_list_ready_tasks built a fresh
+    # Registry per call, so the hook never affected tool-visible ordering.
+    result = json.loads(mcp_server.mac_set_scorer("priority"))
+    assert result["sync_installed"] is True
+
+    ordering = [t["task_id"] for t in json.loads(mcp_server.mac_list_ready_tasks())]
+    assert ordering == ["t-3", "t-2", "t-1"]  # priority 9, 5, 2 — scorer applied
+

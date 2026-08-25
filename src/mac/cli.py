@@ -1140,26 +1140,27 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print("MAC Kanban")
         print("=" * 50)
-        for color_key, color_label in [("red", "待写"), ("yellow", "进行中"), ("green", "待审")]:
+        for color_key, color_label in [("red", "To write"), ("yellow", "In progress"), ("green", "Awaiting review")]:
             section = board[color_key]
             print(f"\n{_color(color_key)} {color_label} ({section['count']}):")
             if section["tasks"]:
-                for t in section["tasks"]:
-                    role_tag = f" [{t.get('required_role', '')}]" if t.get("required_role") else ""
+                kanban_rows: list[dict] = section["tasks"]  # plain dicts from get_kanban()
+                for row in kanban_rows:
+                    role_tag = f" [{row.get('required_role', '')}]" if row.get("required_role") else ""
                     if color_key == "red":
-                        blocked_tag = " [BLOCKED]" if not t.get("dependencies_ok") else ""
-                        print(f"  {t['task_id']}: {t['title'][:50]}{role_tag} (pri:{t['priority']}){blocked_tag}")
+                        blocked_tag = " [BLOCKED]" if not row.get("dependencies_ok") else ""
+                        print(f"  {row['task_id']}: {row['title'][:50]}{role_tag} (pri:{row['priority']}){blocked_tag}")
                     elif color_key == "yellow":
-                        agent = t.get("agent_id", "?")
-                        print(f"  {t['task_id']}: {t['title'][:50]}{role_tag} [{agent}]")
+                        agent = row.get("agent_id", "?")
+                        print(f"  {row['task_id']}: {row['title'][:50]}{role_tag} [{agent}]")
                     else:
-                        agent = t.get("agent_id", "?")
-                        print(f"  {t['task_id']}: {t['title'][:50]} [{agent}]")
+                        agent = row.get("agent_id", "?")
+                        print(f"  {row['task_id']}: {row['title'][:50]} [{agent}]")
             else:
                 print("  (none)")
 
         done = board["done"]
-        print(f"\n✅ 今日已完成 ({done['total']}):")
+        print(f"\n✅ Completed today ({done['total']}):")
         if done["by_agent"]:
             for agent, count in sorted(done["by_agent"].items(), key=lambda x: -x[1]):
                 print(f"  {agent}: {count}")
