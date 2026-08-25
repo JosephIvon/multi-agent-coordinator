@@ -50,8 +50,8 @@ def _resolve_db_path() -> Path:
         raw = os.environ.get("MAC_DB_PATH", "mac.db")
         resolved = Path(raw).resolve()
         # Ensure the parent directory exists so SQLite doesn't fail silently.
-        # Read-only filesystem / network path etc. — let SQLite surface the
-        # error later with a clear message.
+        # Read-only filesystem / network path: let SQLite surface the error
+        # later with a clear message.
         with contextlib.suppress(OSError):
             resolved.parent.mkdir(parents=True, exist_ok=True)
         _DB_PATH = resolved
@@ -115,26 +115,6 @@ def _safe_call(func: Any) -> str:
     if result is None:
         raise ToolError("not_found")
     return _serialize(result)
-
-
-# ---------------------------------------------------------------------------
-# Long-lived registry for scoring hooks (Round 16)
-# ---------------------------------------------------------------------------
-#
-# Unlike _registry() which is rebuilt per call, the scorer tools need a
-# process-wide Registry so set_scoring_fn() sticks across MCP requests.
-# Other tools continue to use the stateless _registry() so they remain
-# side-effect free.
-
-_LONG_REGISTRY: Registry | None = None
-
-
-def _long_registry() -> Registry:
-    # Memoised Registry used by mac_set_scorer / mac_list_scorers / etc.
-    global _LONG_REGISTRY
-    if _LONG_REGISTRY is None:
-        _LONG_REGISTRY = Registry(SQLiteTaskLedger(_DB_PATH))
-    return _LONG_REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +206,14 @@ def mac_record_quality_and_complete(
         task = reg.ledger.get_task_transfer(task_id)
         if task is None:
             return None
-        quality_results = reg.ledger.get_quality_results(task_id)
+        # Gate on the CURRENT attempt's results only (matching done() /
+        # complete_task). Stale passed results from an earlier attempt
+        # must not let this attempt complete with no new evidence.
+        from mac.registry import _current_attempt_quality_results
+
+        quality_results = _current_attempt_quality_results(
+            task, reg.ledger.get_quality_results(task_id),
+        )
         allowed, reason = evaluate_quality_gate(task.test_contract, quality_results)
         if allowed:
             reg.complete_task(task_id, agent_id)
@@ -491,9 +478,11 @@ def mac_reject_review(task_id: str, reviewer_id: str, reason: str = "") -> str:
 def mac_expire_stale_tasks(auto_retry: bool = False) -> str:
     """Expire non-terminal tasks past their TTL.
 
-    Scans for tasks in proposed, accepted, running, or review_ready status
-    whose TTL has elapsed. When auto_retry=True and the task has retries
-    remaining, it is reset to ``proposed`` instead of being failed.
+    Scans for tasks in accepted, running, or review_ready status whose
+    TTL has elapsed (proposed tasks are never expired — they are waiting
+    to be claimed, not abandoned mid-flight; use cleanup_tasks for
+    terminal-state removal). When auto_retry=True and the task has
+    retries remaining, it is reset to ``proposed`` instead of being failed.
 
     :param auto_retry: If True, auto-retry tasks with retries remaining.
     :returns: JSON array of expired/retried TaskTransfer objects.

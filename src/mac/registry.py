@@ -6,7 +6,7 @@ import time
 from collections import OrderedDict
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from mac.events import TaskEvent, TaskEventBus
@@ -29,7 +29,7 @@ from mac.protocol.messages import (
     TaskTransfer,
 )
 from mac.quality.gate import evaluate_quality_gate
-from mac.scoring import ScoringFn, get_scorer, is_async_scorer, resolve_scorer
+from mac.scoring import AsyncScoringFn, ScoringFn, get_scorer, is_async_scorer, resolve_scorer
 from mac.storage import SQLiteTaskLedger, StatusConflict
 from mac.testing.contracts import TestContract
 
@@ -96,7 +96,7 @@ class Registry:
         # hot path never has to inspect asyncio state. Exactly one of
         # _scoring_fn and _async_scoring_fn is non-None after construction.
         self._scoring_fn: ScoringFn | None = None
-        self._async_scoring_fn = None
+        self._async_scoring_fn: AsyncScoringFn | None = None
         self._scoring_fn_id: str | None = None  # stable id used as cache-key suffix
         self.set_scoring_fn(scoring_fn)
 
@@ -174,12 +174,14 @@ class Registry:
 
         if is_async_scorer(resolved):
             self._scoring_fn = None
-            self._async_scoring_fn = resolved
+            self._async_scoring_fn = cast(AsyncScoringFn, resolved)
             self._scoring_fn_id = (
                 f"{getattr(resolved, '__qualname__', repr(resolved))}@async"
             )
         else:
-            sync = self._resolve_scoring_fn(scoring_fn if isinstance(scoring_fn, str) else resolved)
+            sync = self._resolve_scoring_fn(
+                cast(ScoringFn | str, scoring_fn if isinstance(scoring_fn, str) else resolved)
+            )
             self._scoring_fn = sync
             self._async_scoring_fn = None
             self._scoring_fn_id = (
@@ -381,7 +383,10 @@ class Registry:
             details["handoff_to"] = handoff_to
             task.fallback_agent_id = handoff_to
         task.metadata = details
-        self.ledger.save_task_transfer(task)
+        try:
+            self.ledger.save_task_transfer(task, expected_status=previous_status)
+        except StatusConflict as exc:
+            raise StateConflictError(str(exc)) from exc
         self._audit(task, "block_task", agent_id, message=reason,
                     from_status=previous_status, to_status="blocked",
                     metadata={"blocker_id": blocker.blocker_id, "handoff_to": handoff_to})
@@ -401,10 +406,20 @@ class Registry:
         task.status = "proposed"
         task.error_code = None
         task.target_agent_id = task.fallback_agent_id or task.target_agent_id
+        # A resumed task starts a NEW attempt: bump retry_count so quality
+        # results from the blocked attempt are excluded from the current-
+        # attempt gate (same bucketing as retry_task). Without this, a
+        # passed result submitted before the block would satisfy the gate
+        # on the retry with no fresh evidence.
+        task.retry_count += 1
         task.updated_at = _now_id()
-        self.ledger.save_task_transfer(task)
+        try:
+            self.ledger.save_task_transfer(task, expected_status="blocked")
+        except StatusConflict as exc:
+            raise StateConflictError(str(exc)) from exc
         self._audit(task, "resume_blocked_task", agent_id, message=resolution,
-                    from_status="blocked", to_status="proposed")
+                    from_status="blocked", to_status="proposed",
+                    metadata={"retry_count": task.retry_count})
         self._publish(task, "task_resumed", actor=agent_id, from_status="blocked", to_status="proposed")
         return task
 
@@ -433,11 +448,19 @@ class Registry:
 
     def fail_task(self, task_id: str, agent_id: str, error_code: str, message: str = "") -> TaskTransfer:
         task = self._get_task(task_id)
+        if task.status == "completed":
+            raise StateConflictError(
+                f"Task {task_id!r} is already completed; cannot fail."
+            )
+        previous_status = task.status
         task.error_code = error_code
         task.status = "failed"
         task.updated_at = _now_id()
-        self.ledger.save_task_transfer(task)
-        self._audit(task, "fail_task", agent_id, message=message, from_status=None, to_status="failed")
+        try:
+            self.ledger.save_task_transfer(task, expected_status=previous_status)
+        except StatusConflict as exc:
+            raise StateConflictError(str(exc)) from exc
+        self._audit(task, "fail_task", agent_id, message=message, from_status=previous_status, to_status="failed")
         self._publish(task, "task_failed", actor=agent_id, to_status="failed", payload={"error_code": error_code})
         self._invoke_hook("on_task_failed", task_id=task_id, agent_id=agent_id, error_code=error_code, message=message)
         return task
@@ -478,7 +501,12 @@ class Registry:
                     task.updated_at = _now_id()
                     previous_status = task.status
                     task.status = "proposed"
-                    self.ledger.save_task_transfer(task)
+                    try:
+                        self.ledger.save_task_transfer(task, expected_status=previous_status)
+                    except StatusConflict:
+                        # The task moved between scan and write (e.g. the
+                        # agent completed it); the fresher transition wins.
+                        continue
                     self._audit(
                         task, "retry_task", "system",
                         from_status=previous_status, to_status="proposed",
@@ -491,12 +519,16 @@ class Registry:
                     )
                     expired.append(task)
                 else:
-                    failed = self.fail_task(
-                        task.task_id,
-                        agent_id="system",
-                        error_code="TTL_EXPIRED",
-                        message=f"Task exceeded TTL of {task.ttl_seconds}s in state {task.status!r}.",
-                    )
+                    try:
+                        failed = self.fail_task(
+                            task.task_id,
+                            agent_id="system",
+                            error_code="TTL_EXPIRED",
+                            message=f"Task exceeded TTL of {task.ttl_seconds}s in state {task.status!r}.",
+                        )
+                    except StateConflictError:
+                        # Task transitioned concurrently; keep the newer state.
+                        continue
                     expired.append(failed)
         return expired
 
@@ -540,7 +572,12 @@ class Registry:
                     task.updated_at = _now_id()
                     previous_status = task.status
                     task.status = "proposed"
-                    self.ledger.save_task_transfer(task)
+                    try:
+                        self.ledger.save_task_transfer(task, expected_status=previous_status)
+                    except StatusConflict:
+                        # The task moved between scan and write; keep the
+                        # fresher transition.
+                        continue
                     self._audit(
                         task, "lease_expire_retry", "system",
                         from_status=previous_status, to_status="proposed",
@@ -553,12 +590,16 @@ class Registry:
                     )
                     expired.append(task)
                 else:
-                    failed = self.fail_task(
-                        task.task_id,
-                        agent_id="system",
-                        error_code="LEASE_EXPIRED",
-                        message=f"Task lease of {task.lease_seconds}s expired in state {task.status!r}.",
-                    )
+                    try:
+                        failed = self.fail_task(
+                            task.task_id,
+                            agent_id="system",
+                            error_code="LEASE_EXPIRED",
+                            message=f"Task lease of {task.lease_seconds}s expired in state {task.status!r}.",
+                        )
+                    except StateConflictError:
+                        # Task transitioned concurrently; keep the newer state.
+                        continue
                     expired.append(failed)
         return expired
 
@@ -615,10 +656,10 @@ class Registry:
                 done_agents[agent] = done_agents.get(agent, 0) + 1
 
         return {
-            "red": {"label": "待写", "count": len(red), "tasks": red},
-            "yellow": {"label": "进行中", "count": len(yellow), "tasks": yellow},
-            "green": {"label": "待审", "count": len(green), "tasks": green},
-            "done": {"label": "今日已完成", "by_agent": done_agents, "total": sum(done_agents.values())},
+            "red": {"label": "To write", "count": len(red), "tasks": red},
+            "yellow": {"label": "In progress", "count": len(yellow), "tasks": yellow},
+            "green": {"label": "Awaiting review", "count": len(green), "tasks": green},
+            "done": {"label": "Completed today", "by_agent": done_agents, "total": sum(done_agents.values())},
         }
 
     def get_metrics(self) -> dict[str, Any]:
@@ -698,7 +739,10 @@ class Registry:
         task.target_agent_id = selected_fallback
         task.fallback_agent_id = selected_fallback
         task.updated_at = _now_id()
-        self.ledger.save_task_transfer(task)
+        try:
+            self.ledger.save_task_transfer(task, expected_status="failed")
+        except StatusConflict as exc:
+            raise StateConflictError(str(exc)) from exc
         self._audit(task, "retry_task", agent_id, from_status=previous_status, to_status="proposed")
         self._publish(
             task,
@@ -722,7 +766,10 @@ class Registry:
         task.status = "cancelled"
         task.error_code = "TASK_CANCELLED"
         task.updated_at = _now_id()
-        self.ledger.save_task_transfer(task)
+        try:
+            self.ledger.save_task_transfer(task, expected_status=previous_status)
+        except StatusConflict as exc:
+            raise StateConflictError(str(exc)) from exc
         self._audit(task, "cancel_task", agent_id, message=reason, from_status=previous_status, to_status="cancelled")
         self._publish(
             task,
@@ -821,7 +868,14 @@ class Registry:
             agent attempted; the conflict is recorded so the next attempt
             can address it. Defaults to False (informational only).
         """
-        # 0. Hard-refuse the handoff if boundaries are enforced.
+        # 0. Refuse early on a task that is not running: quality evidence
+        # would be persisted for a task that can never consume it.
+        precheck = self._get_task(task_id)
+        if precheck.status not in {"running", "review_ready"}:
+            raise StateConflictError(
+                f"Task {task_id!r} status is {precheck.status!r}; done() requires 'running'."
+            )
+        # 0b. Hard-refuse the handoff if boundaries are enforced.
         if enforce_boundaries and handoff is not None:
             try:
                 self.enforce_path_boundaries(task_id, handoff)
@@ -1124,11 +1178,12 @@ class Registry:
             # Defensive: treat None / NaN returns as 0.0 so a misbehaving
             # scorer can never break sorted() (NaN ordering raises in
             # CPython). Sort descending — higher score claims first.
-            return sorted(
-                ready,
-                key=lambda task, _fn=self._scoring_fn: _safe_score(_fn, task),
-                reverse=True,
-            )
+            scoring_fn = self._scoring_fn
+
+            def _score(task: TaskTransfer) -> float:
+                return _safe_score(scoring_fn, task)
+
+            return sorted(ready, key=_score, reverse=True)
         return ready
 
     async def alist_ready_tasks(
@@ -1162,7 +1217,11 @@ class Registry:
             return ready
 
         scores = await self._ascore_tasks(ready)
-        return sorted(ready, key=lambda task, _m=scores: _m[task.task_id], reverse=True)
+        return sorted(
+            ready,
+            key=lambda task: scores[task.task_id],
+            reverse=True,
+        )
 
     async def _ascore_tasks(self, tasks):
         # Compute task_id -> float using the LRU+TTL cache.
@@ -1344,7 +1403,9 @@ class Registry:
                     ),
                     None,
                 )
-                severity = "blocking" if hit_guard is not None else "non_blocking"
+                severity: Literal["blocking", "non_blocking"] = (
+                    "blocking" if hit_guard is not None else "non_blocking"
+                )
                 description = (
                     f"Tasks {task_id} and {other.task_id} both report "
                     f"{path!r} in changed_files under guarded module "

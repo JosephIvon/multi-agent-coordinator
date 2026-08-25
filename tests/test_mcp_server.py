@@ -222,6 +222,45 @@ class TestMacRecordQualityAndComplete:
         parsed = json.loads(result)
         assert parsed["status"] == "completed"
 
+    def test_stale_attempt_results_do_not_complete_new_attempt(self, tmp_path: Path) -> None:
+        # Regression (M-1): the tool used to gate on ALL quality results,
+        # so a passed result from an earlier attempt (retry_count=0) could
+        # complete a later attempt (retry_count=1) with no fresh evidence.
+        from mac.testing.contracts import TestContract
+
+        reg, _ = _registry_with_db(tmp_path)
+        self._setup_running_task(reg)
+        task = reg.ledger.get_task_transfer("task-1")
+        task.test_contract = TestContract(
+            risk_level="medium",
+            required_commands=["python -m pytest tests"],
+            required_evidence=["test_output"],
+        )
+        reg.ledger.save_task_transfer(task)
+        # Attempt 0 evidence: gate would pass on these…
+        reg.submit_quality_result(
+            "task-1",
+            {
+                "command": "python -m pytest tests",
+                "status": "passed",
+                "evidence": ["test_output"],
+            },
+        )
+        # …but the task failed and was retried, so attempt 1 starts empty.
+        reg.fail_task("task-1", "agent-1", "FLAKY")
+        reg.retry_task("task-1", agent_id="agent-1")
+        reg.claim_next_task(agent_id="agent-1", capability="write_code")
+        reg.start_task("task-1", "agent-1")
+
+        result = mac_record_quality_and_complete(
+            task_id="task-1",
+            agent_id="agent-1",
+            result={"command": "python -m pytest tests", "status": "failed"},
+        )
+        parsed = json.loads(result)
+        assert parsed["status"] == "running"
+        assert "no_passed_results" in parsed["reason"]
+
 
 class TestMacFailTask:
     def test_fail_running_task(self, tmp_path: Path) -> None:
@@ -802,7 +841,6 @@ class TestMacListAgents:
         parsed = json.loads(result)
         assert isinstance(parsed, list)
         assert all(a["status"] == "online" for a in parsed)
-
 
     def test_list_agents_filter_by_offline_returns_offline_agents(self, tmp_path: Path) -> None:
         # Regression (H-2): discover() defaults to status="online", so a

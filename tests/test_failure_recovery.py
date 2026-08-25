@@ -146,3 +146,120 @@ def test_recovery_operations_publish_events(tmp_path):
     assert "task_checkpointed" in [event.type for event in events]
     assert "task_retried" in [event.type for event in events]
     assert "task_cancelled" in [event.type for event in events]
+
+
+def test_resume_blocked_task_starts_new_attempt(tmp_path):
+    # Regression (M-2): resume_blocked_task used to keep retry_count
+    # unchanged, so quality results from the blocked attempt stayed in the
+    # "current attempt" bucket and could satisfy the gate on the retry.
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task(risk="low"))
+    registry.accept_handoff("task-1", "tester")
+    registry.start_task("task-1", "tester")
+
+    blocked = registry.block_task("task-1", agent_id="tester", reason="waiting on spec")
+    assert blocked.status == "blocked"
+
+    resumed = registry.resume_blocked_task("task-1", agent_id="planner", resolution="spec clarified")
+    assert resumed.status == "proposed"
+    assert resumed.retry_count == 1
+
+    # Re-run the task: the new attempt's quality result is stamped with
+    # the bumped retry_count, keeping attempt buckets disjoint.
+    registry.accept_handoff("task-1", "tester")
+    registry.start_task("task-1", "tester")
+    registry.submit_quality_result(
+        "task-1",
+        {
+            "agent_id": "tester",
+            "command": "pytest related tests or smoke test",
+            "status": "passed",
+            "evidence": ["test_output"],
+        },
+    )
+    completed = registry.complete_task("task-1", "tester")
+    assert completed.status == "completed"
+
+
+def test_quality_gate_ignores_stale_passed_results_after_resume(tmp_path):
+    # End-to-end variant (M-1/M-2): a passed result submitted before the
+    # block must NOT let the post-resume attempt complete without fresh
+    # evidence.
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task(risk="low"))
+    registry.accept_handoff("task-1", "tester")
+    registry.start_task("task-1", "tester")
+
+    # Attempt 0: gate passes, but the task gets blocked (e.g. a blocking
+    # conflict) before completing.
+    registry.submit_quality_result(
+        "task-1",
+        {
+            "agent_id": "tester",
+            "command": "pytest related tests or smoke test",
+            "status": "passed",
+            "evidence": ["test_output"],
+        },
+    )
+    registry.block_task("task-1", agent_id="tester", reason="blocking conflict")
+    registry.resume_blocked_task("task-1", agent_id="planner", resolution="resolved")
+
+    # New attempt reaches running with NO fresh evidence.
+    registry.accept_handoff("task-1", "tester")
+    registry.start_task("task-1", "tester")
+
+    with pytest.raises(QualityGateError):
+        registry.complete_task("task-1", "tester")
+
+
+def test_fail_task_refuses_completed_task_without_audit_side_effect(tmp_path):
+    # Regression (M-3): fail_task used to blind-write over any status, so a
+    # late expire_stale_tasks could overwrite a just-completed task.
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task())
+    registry.accept_handoff("task-1", "tester")
+    registry.start_task("task-1", "tester")
+    registry.complete_task("task-1", "tester")
+
+    with pytest.raises(StateConflictError):
+        registry.fail_task("task-1", "system", "TTL_EXPIRED")
+
+    assert registry.get_task("task-1").status == "completed"
+
+
+def test_cancel_task_loses_race_to_concurrent_transition(tmp_path):
+    # Read-modify-write guard: cancelling from a stale snapshot must raise
+    # instead of clobbering the newer status.
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    registry.submit_task(_task())
+    task = registry.get_task("task-1")  # stale snapshot: still 'proposed'
+    registry.cancel_task("task-1", agent_id="planner", reason="obsolete")
+
+    # Simulate the stale writer finishing after the cancel landed.
+    task.status = "cancelled"
+    task.updated_at = "2026-01-01T00:00:00+00:00"
+    from mac.storage.sqlite import StatusConflict
+
+    with pytest.raises(StatusConflict):
+        registry.ledger.save_task_transfer(task, expected_status="proposed")
+
+    assert registry.get_task("task-1").status == "cancelled"
+
+
+def test_expire_stale_tasks_skips_task_that_completed_concurrently(tmp_path):
+    # The expiry loop must swallow the StateConflictError from fail_task's
+    # CAS and keep the newer (completed) state.
+    registry = Registry(SQLiteTaskLedger(tmp_path / "mac.db"))
+    stale = _task("task-old")
+    stale.ttl_seconds = 1
+    stale.updated_at = "2020-01-01T00:00:00+00:00"
+    registry.submit_task(stale)
+    registry.accept_handoff("task-old", "tester")
+    registry.start_task("task-old", "tester")
+    registry.complete_task("task-old", "tester")
+
+    import time as _time
+
+    expired = registry.expire_stale_tasks(now=_time.time() + 3600)
+    assert expired == []
+    assert registry.get_task("task-old").status == "completed"
