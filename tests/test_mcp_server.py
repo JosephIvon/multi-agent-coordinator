@@ -801,6 +801,27 @@ class TestMacListAgents:
         assert all(a["status"] == "online" for a in parsed)
 
 
+    def test_list_agents_filter_by_offline_returns_offline_agents(self, tmp_path: Path) -> None:
+        # Regression (H-2): discover() defaults to status="online", so a
+        # naive filter-after-discover silently dropped every offline agent.
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("live", "write_code"))
+        offline = _agent("ghost", "write_code").model_copy(update={"status": "offline"})
+        reg.ledger.save_agent_card(offline)
+
+        parsed = json.loads(mac_list_agents(status="offline"))
+        assert [a["agent_id"] for a in parsed] == ["ghost"]
+
+    def test_list_agents_all_includes_offline_agents(self, tmp_path: Path) -> None:
+        reg, _ = _registry_with_db(tmp_path)
+        reg.register_agent(_agent("live", "write_code"))
+        offline = _agent("ghost", "write_code").model_copy(update={"status": "offline"})
+        reg.ledger.save_agent_card(offline)
+
+        parsed = json.loads(mac_list_agents(status="all"))
+        assert {a["agent_id"] for a in parsed} == {"live", "ghost"}
+
+
 class TestMacBlockTask:
     def test_block_running_task(self, tmp_path: Path) -> None:
         reg, _ = _registry_with_db(tmp_path)

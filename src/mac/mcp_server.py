@@ -571,7 +571,9 @@ def mac_list_agents(status: str = "online") -> str:
     """
 
     def _do() -> Any:
-        agents = _registry().discover()
+        # Fetch ALL agents first, then filter by status — filtering after
+        # discover()'s default status="online" would make offline/all no-ops.
+        agents = _registry().discover(status=None)
         if status != "all":
             agents = [a for a in agents if a.status == status]
         return agents
