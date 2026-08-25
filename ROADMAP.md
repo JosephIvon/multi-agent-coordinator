@@ -1,8 +1,8 @@
 # MAC-Agent Roadmap
 
 > Version: 1.2.1
-> Date: 2026-08-13
-> Status: **maintenance mode**
+> Date: 2026-08-25
+> Status: **maintenance mode (formalization track open)**
 
 ---
 
@@ -12,12 +12,14 @@ MAC-Agent is a lightweight coordination ledger for AI coding agents. It provides
 shared task state, context handoff, quality evidence, plan grouping, dependency
 readiness, conflict records, and packet generation.
 
-**Maturity**: Production/Stable
+**Maturity**: Production/Stable (ledger semantics under formalization — see
+"Formalization P0/P1" below; green CI covers build/test/lint only, not the
+semantic guarantees listed there)
 **License**: MIT (open source)
 **Python**: 3.10+
 **MCP Tools**: 31
 **CLI Subcommands**: ~40
-**Tests**: 566 passed, 1 skipped (latest local validation, no reruns)
+**Tests**: 583 collected (latest local validation, no reruns)
 
 ---
 
@@ -85,6 +87,73 @@ Items accepted for upstream maintenance:
 - [x] Cross-repo contract guard (mac_coffee <-> mac-agent)
 - [x] 7 HIGH priority fixes (version, role param, expire-leases, metrics)
 - [x] KNOWN_ISSUES.md tracking template and resolved-issue workflow
+- [x] Third-party review follow-ups H-1/H-2, M-1..M-4 (scorer visibility,
+  agent filter, per-attempt evidence gate, status CAS on terminal writers)
+- [x] Version==tag release gate (`scripts/check_version_tag.py` in publish.yml)
+
+---
+
+## Formalization P0/P1 (semantic risks — CI green does NOT close these)
+
+Identified 2026-08-25 during the 1.2.1 release audit. These are ledger
+*semantics* gaps: each one can silently corrupt coordination truth under
+concurrency or partial failure even with all tests passing. They are tracked
+here so "maintenance mode" is not read as "production-proven semantics".
+
+### P0 — correctness of the coordination truth
+
+1. **SQLite multi-step write atomicity.** Lifecycle flows perform
+   read-modify-write across multiple independent writes with no shared
+   transaction boundary — e.g. `done()` alone runs precheck →
+   `submit_quality_result` → gate evaluation → handoff save → status CAS
+   → audit/conflict writes as separate committed steps (see
+   `registry.py::done`). A crash between steps leaves the ledger
+   internally inconsistent (quality evidence persisted for a task that
+   never transitioned, handoff saved without completion, etc.). Fix
+   direction: per-flow transaction scopes (or a write-ahead intent
+   journal) so each lifecycle transition is all-or-nothing. Related
+   landed work: status CAS on terminal writers (M-3) and the done()
+   running-precheck narrow the window but do not close it.
+2. **HTTP default authentication.** `create_app()` only enforces a bearer
+   token when one is passed or `MAC_HTTP_TOKEN` is set — with neither, the
+   full API is unauthenticated (loopback bind by default, but `MAC_HTTP_HOST`
+   can expose it). P0 work: fail closed for non-loopback binds without a
+   token, deprecate the unauthenticated default explicitly, and document
+   that loopback trust is an opt-in assumption, not a security boundary.
+3. **Receipt full binding (回执全绑定).** Durable callbacks (`claim_callback`)
+   dedupe on event id but bind neither the executor attempt nor a content
+   hash of the claimed payload; a late or replayed receipt can be applied
+   to a newer attempt than the one that produced it. Fix direction:
+   receipts must carry and verify attempt identity + content hash before
+   mutating state (extends M-1's current-attempt bucketing from the gate
+   layer to the transport layer).
+4. **Attempt / fence identity.** `TaskTransfer` tracks `retry_count` and
+   lease holder/expiry but carries no monotonically increasing
+   `attempt_id` / fencing token. Two concurrent writers (lease-expiry
+   takeover vs. a slow original writer) can interleave writes with no
+   ordering arbiter — status CAS catches status-field races but not
+   last-writer-wins on payload/evidence fields. Fix direction: per-task
+   `attempt_id` + fencing token checked on every write path, including
+   quality evidence and handoff saves.
+
+### P1 — robustness of completion semantics
+
+5. **Weak 2xx == completed judgment.** `adapters/http.py` maps any 2xx to
+   `"completed"` by status code alone (`status = "completed" if 200 <=
+   result.status_code < 300`); the body is never inspected for a success
+   envelope. A 200 carrying an error body or truncated payload still
+   completes the task. Fix direction: require a structured success envelope
+   (status field + artifact refs) before the completed transition; anything
+   else lands in `receipt_pending` / `correction_required`.
+
+**Ordering**: P0-3 and P0-4 are prerequisites for trusting any multi-writer
+takeover flow (including mac_coffee's lease/heartbeat model); P0-1 bounds
+the blast radius of all of them; P1-5 is independently schedulable.
+
+**Boundary**: these live upstream (mac-agent) because they are ledger
+semantics, not commercial features. mac_coffee inherits each fix via the
+version pin; no contract bump expected unless the receipt schema changes
+(P0-3 may require contract version 2, coordinated with mac_coffee).
 
 ---
 
